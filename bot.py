@@ -174,11 +174,16 @@ async def fetch_json(url: str) -> Any:
         return await r.json(content_type=None)
 
 
-async def fetch_gamerpower_pc() -> list[dict]:
+GAMERPOWER_PLATFORMS = ["pc", "epic-games-store", "steam", "gog", "ubisoft", "drm-free", "amazon"]
+
+
+async def _fetch_gamerpower_one(platform: str) -> list[dict]:
     try:
-        data = await fetch_json("https://www.gamerpower.com/api/giveaways?platform=pc&type=game")
+        data = await fetch_json(
+            f"https://www.gamerpower.com/api/giveaways?platform={platform}&type=game"
+        )
     except Exception as e:
-        log.warning("GamerPower fetch fallita: %s", e)
+        log.warning("GamerPower fetch %s fallita: %s", platform, e)
         return []
     games = []
     for it in data:
@@ -187,19 +192,35 @@ async def fetch_gamerpower_pc() -> list[dict]:
         title = (it.get("title") or "").strip()
         if not title:
             continue
+        platforms_str = it.get("platforms", "PC") or "PC"
+        is_prime = "amazon" in platforms_str.lower() or "prime" in platforms_str.lower()
+        source = "Amazon Prime Gaming" if is_prime else "GamerPower"
         games.append({
             "id": f"gp_{normalize_title(title)}",
             "title": title,
             "description": (it.get("description") or "").strip(),
             "url": it.get("open_giveaway_url") or it.get("gamerpower_url") or "",
             "image": it.get("image") or it.get("thumbnail") or "",
-            "platform": it.get("platforms", "PC"),
+            "platform": platforms_str,
             "end_date": it.get("end_date", "N/D"),
-            "source": "GamerPower",
+            "source": source,
             "worth": it.get("worth", "N/A"),
             "translate": True,
         })
     return games
+
+
+async def fetch_gamerpower_pc() -> list[dict]:
+    results = await asyncio.gather(*[_fetch_gamerpower_one(p) for p in GAMERPOWER_PLATFORMS])
+    out, seen = [], set()
+    for batch in results:
+        for g in batch:
+            key = normalize_title(g["title"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(g)
+    return out
 
 
 async def fetch_epic_free() -> list[dict]:
