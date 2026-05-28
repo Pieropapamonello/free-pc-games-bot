@@ -202,6 +202,7 @@ class State:
                         self.chats.add(cid)
                         if isinstance(v, dict) and v.get("categories"):
                             self.prefs[cid] = set(v["categories"])
+                self.genres_prefs = {}
                 if isinstance(prefs, dict):
                     for k, v in prefs.items():
                         cid = int(k)
@@ -210,6 +211,9 @@ class State:
                             self.prefs[cid] = set(cats)
                         elif isinstance(cats, dict):
                             self.prefs[cid] = {c for c, ok in cats.items() if ok}
+                        gens = v.get("genres") if isinstance(v, dict) else None
+                        if isinstance(gens, list):
+                            self.genres_prefs[cid] = set(gens)
                 self.sent = set(sent.keys()) if isinstance(sent, dict) else set()
                 log.info("Stato caricato da Firebase: %d chat, %d sent, %d prefs", len(self.chats), len(self.sent), len(self.prefs))
                 return
@@ -291,6 +295,20 @@ class State:
     def get_prefs(self, chat_id: int) -> set[str]:
         return self.prefs.get(chat_id) or {"pc"}
 
+    def set_genres(self, chat_id: int, genres: set[str]):
+        self.genres_prefs = getattr(self, "genres_prefs", {})
+        self.genres_prefs[chat_id] = set(genres)
+        if USE_FIREBASE:
+            try:
+                firebase_put(f"prefs/{chat_id}/genres", list(genres))
+                return
+            except Exception as e:
+                log.warning("Firebase genres save fallita: %s", e)
+
+    def get_genres(self, chat_id: int) -> set[str]:
+        self.genres_prefs = getattr(self, "genres_prefs", {})
+        return self.genres_prefs.get(chat_id) or set()
+
 
 state = State()
 _session: Optional[aiohttp.ClientSession] = None
@@ -343,6 +361,52 @@ GAMERPOWER_CONSOLE_PLATFORMS = ["ps4", "ps5", "xbox-one", "xbox-series-xs", "swi
 GAMERPOWER_MOBILE_PLATFORMS = ["android", "ios"]
 
 
+GENRE_KEYWORDS = {
+    "azione": ["action", "fight", "combat", "beat 'em up", "hack and slash", "azione"],
+    "avventura": ["adventure", "quest", "journey", "exploration", "avventura", "esplorazione"],
+    "rpg": ["rpg", "role-playing", "role playing", "jrpg", "ruolo"],
+    "strategia": ["strategy", "rts", "turn-based", "tactic", "4x", "strategia", "strategico"],
+    "simulazione": ["simulator", "simulation", "tycoon", "management", "simulazione", "simulatore"],
+    "sport": ["sport", "soccer", "football", "basketball", "tennis", "golf", "calcio"],
+    "corse": ["racing", "race ", "racer", "driving", "corse", "corsa"],
+    "puzzle": ["puzzle", "escape room", "brain", "rompicapo", "enigma"],
+    "platform": ["platformer", "platform game", "2d platform", "platform"],
+    "sparatutto": ["shooter", "fps", "third-person shooter", "sparatutto"],
+    "survival": ["survival", "sopravvivenza"],
+    "horror": ["horror", "scary", "psychological horror"],
+    "roguelike": ["roguelike", "roguelite"],
+    "indie": ["indie", "indipendente"],
+    "casual": ["casual", "relaxing", "rilassante"],
+}
+
+GENRE_LABELS = {
+    "azione": "🗡️ Azione",
+    "avventura": "🧭 Avventura",
+    "rpg": "⚔️ RPG",
+    "strategia": "♟️ Strategia",
+    "simulazione": "🏗️ Simulazione",
+    "sport": "⚽ Sport",
+    "corse": "🏎️ Corse",
+    "puzzle": "🧩 Puzzle",
+    "platform": "🦘 Platform",
+    "sparatutto": "🔫 Sparatutto",
+    "survival": "🏕️ Survival",
+    "horror": "👻 Horror",
+    "roguelike": "🎲 Roguelike",
+    "indie": "🎨 Indie",
+    "casual": "☕ Casual",
+}
+
+
+def detect_genres(title: str, description: str) -> list[str]:
+    haystack = f"{title} {description}".lower()
+    genres = []
+    for g, kws in GENRE_KEYWORDS.items():
+        if any(k in haystack for k in kws):
+            genres.append(g)
+    return genres
+
+
 def _categorize(platforms_str: str) -> list[str]:
     s = (platforms_str or "").lower()
     cats = []
@@ -378,10 +442,11 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
         platforms_str = it.get("platforms", "PC") or "PC"
         is_prime = "amazon" in platforms_str.lower() or "prime" in platforms_str.lower()
         source = "Amazon Prime Gaming" if is_prime else "GamerPower"
+        gp_desc = (it.get("description") or "").strip()
         games.append({
             "id": f"gp_{normalize_title(title)}",
             "title": title,
-            "description": (it.get("description") or "").strip(),
+            "description": gp_desc,
             "url": it.get("open_giveaway_url") or it.get("gamerpower_url") or "",
             "image": it.get("image") or it.get("thumbnail") or "",
             "platform": platforms_str,
@@ -390,6 +455,7 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
             "worth": it.get("worth", "N/A"),
             "translate": True,
             "categories": _categorize(platforms_str),
+            "genres": detect_genres(title, gp_desc),
         })
     return games
 
@@ -496,6 +562,7 @@ async def fetch_epic_free() -> list[dict]:
             "worth": "N/A",
             "translate": False,
             "categories": ["pc"],
+            "genres": detect_genres(title, desc),
         })
     return games
 
@@ -544,6 +611,7 @@ async def fetch_reddit_prime() -> list[dict]:
             "worth": "N/A",
             "translate": False,
             "categories": ["pc"],
+            "genres": detect_genres(clean, desc),
         })
     return games
 
@@ -571,6 +639,17 @@ def filter_by_categories(games: list[dict], wanted: set[str]) -> list[dict]:
     for g in games:
         cats = set(g.get("categories") or ["pc"])
         if cats & wanted:
+            out.append(g)
+    return out
+
+
+def filter_by_genres(games: list[dict], wanted: set[str]) -> list[dict]:
+    if not wanted or "all" in wanted:
+        return games
+    out = []
+    for g in games:
+        gens = set(g.get("genres") or [])
+        if gens & wanted:
             out.append(g)
     return out
 
@@ -664,7 +743,8 @@ async def search_steam_trailer(title: str) -> Optional[str]:
         return None
 
 
-async def search_youtube_video(query: str) -> Optional[str]:
+async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
+    """Restituisce (video_url, thumbnail_url) oppure None."""
     sess = await get_session()
     from urllib.parse import quote_plus
     q = quote_plus(f"{query} gameplay trailer")
@@ -682,7 +762,10 @@ async def search_youtube_video(query: str) -> Optional[str]:
     if not m:
         return None
     vid = m.group(1)
-    return f"https://www.youtube.com/watch?v={vid}"
+    return (
+        f"https://www.youtube.com/watch?v={vid}",
+        f"https://img.youtube.com/vi/{vid}/hqdefault.jpg",
+    )
 
 
 async def send_game(chat_id: int, g: dict):
@@ -705,21 +788,25 @@ async def send_game(chat_id: int, g: dict):
             log.warning("sendVideo fallita, fallback YouTube/foto: %s", e)
     yt = await search_youtube_video(clean_title(g["title"]))
     if yt:
+        yt_url, yt_thumb = yt
         try:
-            text = f'🎬 <a href="{html_escape(yt)}">Guarda il trailer / gameplay su YouTube</a>\n\n{caption}'
             r = await tg_api(
-                "sendMessage",
+                "sendPhoto",
                 chat_id=chat_id,
-                text=text,
+                photo=yt_thumb,
+                caption=caption,
                 parse_mode="HTML",
-                disable_web_page_preview=False,
-                link_preview_options={"url": yt, "prefer_large_media": True, "show_above_text": True},
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "▶️ Guarda trailer", "url": yt_url},
+                    ]]
+                },
             )
             if r.get("ok"):
                 return
-            log.info("sendMessage YouTube non OK, fallback foto: %s", r.get("description"))
+            log.info("sendPhoto YouTube thumb non OK: %s", r.get("description"))
         except Exception as e:
-            log.warning("sendMessage YouTube fallita, fallback foto: %s", e)
+            log.warning("sendPhoto YouTube thumb fallita: %s", e)
     if g.get("image"):
         try:
             await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="HTML")
@@ -752,6 +839,19 @@ def platforms_keyboard(current: set[str]) -> dict:
     }
 
 
+def genres_keyboard(current: set[str]) -> dict:
+    def btn(code: str) -> dict:
+        mark = "✅ " if code in current else ""
+        return {"text": f"{mark}{GENRE_LABELS[code]}", "callback_data": f"gen:{code}"}
+    codes = list(GENRE_LABELS.keys())
+    rows = [[btn(codes[i]), btn(codes[i + 1])] for i in range(0, len(codes) - 1, 2)]
+    if len(codes) % 2 == 1:
+        rows.append([btn(codes[-1])])
+    rows.append([{"text": "🌍 Tutti i generi", "callback_data": "gen:all"}])
+    rows.append([{"text": "✔️ Conferma", "callback_data": "gen:done"}])
+    return {"inline_keyboard": rows}
+
+
 def handle_update(update: dict) -> Optional[dict]:
     cb = update.get("callback_query")
     if cb:
@@ -759,30 +859,52 @@ def handle_update(update: dict) -> Optional[dict]:
         chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id")
         msg_id = (cb.get("message") or {}).get("message_id")
         cb_id = cb.get("id")
-        if not chat_id or not data.startswith("pref:"):
+        if not chat_id:
             return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
-        code = data.split(":", 1)[1]
-        current = state.get_prefs(chat_id) or set()
-        if code == "all":
-            current = {"pc", "console", "android"}
-        elif code == "done":
-            if not current:
-                current = {"pc"}
-            state.set_prefs(chat_id, current)
-            labels = {"pc": "PC", "console": "Console", "android": "Android"}
-            chosen = ", ".join(labels[c] for c in ["pc", "console", "android"] if c in current) or "Nessuna"
-            asyncio.create_task(_finish_setup(chat_id, msg_id, chosen, cb_id))
-            return None
-        elif code in ("pc", "console", "android"):
-            if code in current:
-                current.discard(code)
+        if data.startswith("pref:"):
+            code = data.split(":", 1)[1]
+            current = state.get_prefs(chat_id) or set()
+            if code == "all":
+                current = {"pc", "console", "android"}
+            elif code == "done":
+                if not current:
+                    current = {"pc"}
+                state.set_prefs(chat_id, current)
+                labels = {"pc": "PC", "console": "Console", "android": "Android"}
+                chosen = ", ".join(labels[c] for c in ["pc", "console", "android"] if c in current) or "Nessuna"
+                asyncio.create_task(_finish_setup(chat_id, msg_id, chosen, cb_id))
+                return None
+            elif code in ("pc", "console", "android"):
+                if code in current:
+                    current.discard(code)
+                else:
+                    current.add(code)
             else:
-                current.add(code)
-        else:
-            return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
-        state.set_prefs(chat_id, current)
-        asyncio.create_task(_update_keyboard(chat_id, msg_id, current, cb_id))
-        return None
+                return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+            state.set_prefs(chat_id, current)
+            asyncio.create_task(_update_keyboard(chat_id, msg_id, current, cb_id))
+            return None
+        if data.startswith("gen:"):
+            code = data.split(":", 1)[1]
+            current = state.get_genres(chat_id) or set()
+            if code == "all":
+                current = set()
+            elif code == "done":
+                state.set_genres(chat_id, current)
+                chosen = "Tutti" if not current else ", ".join(GENRE_LABELS[c].split(" ", 1)[-1] for c in current)
+                asyncio.create_task(_finish_genres(chat_id, msg_id, chosen, cb_id))
+                return None
+            elif code in GENRE_LABELS:
+                if code in current:
+                    current.discard(code)
+                else:
+                    current.add(code)
+            else:
+                return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+            state.set_genres(chat_id, current)
+            asyncio.create_task(_update_genres_keyboard(chat_id, msg_id, current, cb_id))
+            return None
+        return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
     msg = update.get("message") or update.get("edited_message") or update.get("channel_post")
     if msg:
         chat = msg.get("chat") or {}
@@ -811,6 +933,19 @@ def handle_update(update: dict) -> Optional[dict]:
                 "text": WELCOME_NEW if added else WELCOME_ALREADY,
                 "parse_mode": "HTML",
                 "reply_markup": platforms_keyboard(current),
+            }
+        if cmd == "/generi":
+            current = state.get_genres(chat_id)
+            return {
+                "method": "sendMessage",
+                "chat_id": chat_id,
+                "text": (
+                    "🎯 <b>Filtra per generi</b>\n\n"
+                    "Seleziona i generi che ti interessano (o 'Tutti' per non filtrare). "
+                    "Verranno mostrati solo giochi che corrispondono ad almeno uno dei generi scelti."
+                ),
+                "parse_mode": "HTML",
+                "reply_markup": genres_keyboard(current),
             }
         if cmd == "/stop":
             ok = state.unsubscribe(chat_id)
@@ -865,8 +1000,9 @@ async def _handle_giochi(chat_id: int):
     try:
         games = await fetch_all_games()
         games = filter_by_categories(games, state.get_prefs(chat_id))
+        games = filter_by_genres(games, state.get_genres(chat_id))
         if not games:
-            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratuito trovato al momento per le piattaforme scelte. Usa /piattaforme per cambiarle.")
+            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratuito trovato per i tuoi filtri. Cambia con /piattaforme o /generi.")
             return
         for g in games[:12]:
             try:
@@ -900,10 +1036,11 @@ async def _finish_setup(chat_id: int, msg_id: int, chosen: str, cb_id: str):
             chat_id=chat_id,
             message_id=msg_id,
             text=(
-                f"✅ <b>Preferenze salvate</b>\n\nRiceverai giochi gratis per: <b>{html_escape(chosen)}</b>\n\n"
+                f"✅ <b>Piattaforme salvate</b>\n\nRiceverai giochi gratis per: <b>{html_escape(chosen)}</b>\n\n"
                 "Comandi:\n"
                 "• /giochi – giochi disponibili ora\n"
                 "• /piattaforme – cambia piattaforme\n"
+                "• /generi – filtra per genere\n"
                 "• /status – stato iscrizione\n"
                 "• /stop – disiscriviti"
             ),
@@ -912,7 +1049,40 @@ async def _finish_setup(chat_id: int, msg_id: int, chosen: str, cb_id: str):
     except Exception as e:
         log.warning("editMessageText fallita: %s", e)
     try:
-        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Preferenze salvate ✓")
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Salvato ✓")
+    except Exception:
+        pass
+
+
+async def _update_genres_keyboard(chat_id: int, msg_id: int, current: set[str], cb_id: str):
+    try:
+        await tg_api(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=msg_id,
+            reply_markup=genres_keyboard(current),
+        )
+    except Exception as e:
+        log.warning("editMessageReplyMarkup gen fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id)
+    except Exception:
+        pass
+
+
+async def _finish_genres(chat_id: int, msg_id: int, chosen: str, cb_id: str):
+    try:
+        await tg_api(
+            "editMessageText",
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=f"✅ <b>Generi salvati</b>\n\nFiltro generi: <b>{html_escape(chosen)}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.warning("editMessageText gen fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Generi salvati ✓")
     except Exception:
         pass
 
@@ -930,6 +1100,7 @@ async def broadcast_new_games():
         for chat_id in list(state.chats):
             prefs = state.get_prefs(chat_id)
             chat_games = filter_by_categories(new, prefs)
+            chat_games = filter_by_genres(chat_games, state.get_genres(chat_id))
             if not chat_games:
                 continue
             for g in chat_games:
