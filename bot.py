@@ -185,6 +185,7 @@ class State:
     def __init__(self):
         self.chats: set[int] = set()
         self.sent: set[str] = set()
+        self.prefs: dict[int, set[str]] = {}
         self._load()
 
     def _load(self):
@@ -192,9 +193,25 @@ class State:
             try:
                 chats = firebase_get("chats") or {}
                 sent = firebase_get("sent") or {}
-                self.chats = {int(k) for k in chats.keys()} if isinstance(chats, dict) else set()
+                prefs = firebase_get("prefs") or {}
+                self.chats = set()
+                self.prefs = {}
+                if isinstance(chats, dict):
+                    for k, v in chats.items():
+                        cid = int(k)
+                        self.chats.add(cid)
+                        if isinstance(v, dict) and v.get("categories"):
+                            self.prefs[cid] = set(v["categories"])
+                if isinstance(prefs, dict):
+                    for k, v in prefs.items():
+                        cid = int(k)
+                        cats = v.get("categories") if isinstance(v, dict) else v
+                        if isinstance(cats, list):
+                            self.prefs[cid] = set(cats)
+                        elif isinstance(cats, dict):
+                            self.prefs[cid] = {c for c, ok in cats.items() if ok}
                 self.sent = set(sent.keys()) if isinstance(sent, dict) else set()
-                log.info("Stato caricato da Firebase: %d chat, %d giochi inviati", len(self.chats), len(self.sent))
+                log.info("Stato caricato da Firebase: %d chat, %d sent, %d prefs", len(self.chats), len(self.sent), len(self.prefs))
                 return
             except Exception as e:
                 log.error("Firebase load fallita: %s — fallback a file", e)
@@ -262,6 +279,18 @@ class State:
                 log.warning("Firebase patch sent fallita: %s", e)
         self._save_sent()
 
+    def set_prefs(self, chat_id: int, categories: set[str]):
+        self.prefs[chat_id] = set(categories)
+        if USE_FIREBASE:
+            try:
+                firebase_put(f"prefs/{chat_id}/categories", list(categories))
+                return
+            except Exception as e:
+                log.warning("Firebase prefs save fallita: %s", e)
+
+    def get_prefs(self, chat_id: int) -> set[str]:
+        return self.prefs.get(chat_id) or {"pc"}
+
 
 state = State()
 _session: Optional[aiohttp.ClientSession] = None
@@ -309,7 +338,21 @@ async def fetch_json(url: str) -> Any:
         return await r.json(content_type=None)
 
 
-GAMERPOWER_PLATFORMS = ["pc", "epic-games-store", "steam", "gog", "ubisoft", "drm-free"]
+GAMERPOWER_PC_PLATFORMS = ["pc", "epic-games-store", "steam", "gog", "ubisoft", "drm-free"]
+GAMERPOWER_CONSOLE_PLATFORMS = ["ps4", "ps5", "xbox-one", "xbox-series-xs", "switch"]
+GAMERPOWER_MOBILE_PLATFORMS = ["android", "ios"]
+
+
+def _categorize(platforms_str: str) -> list[str]:
+    s = (platforms_str or "").lower()
+    cats = []
+    if any(k in s for k in ["pc", "steam", "epic", "gog", "ubisoft", "drm-free", "itch", "battle.net", "origin"]):
+        cats.append("pc")
+    if any(k in s for k in ["ps4", "ps5", "playstation", "xbox", "switch", "nintendo"]):
+        cats.append("console")
+    if any(k in s for k in ["android", "ios", "mobile"]):
+        cats.append("android")
+    return cats or ["pc"]
 
 
 async def _fetch_gamerpower_one(platform: str) -> list[dict]:
@@ -346,12 +389,14 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
             "source": source,
             "worth": it.get("worth", "N/A"),
             "translate": True,
+            "categories": _categorize(platforms_str),
         })
     return games
 
 
-async def fetch_gamerpower_pc() -> list[dict]:
-    results = await asyncio.gather(*[_fetch_gamerpower_one(p) for p in GAMERPOWER_PLATFORMS])
+async def fetch_gamerpower_all() -> list[dict]:
+    platforms = GAMERPOWER_PC_PLATFORMS + GAMERPOWER_CONSOLE_PLATFORMS + GAMERPOWER_MOBILE_PLATFORMS
+    results = await asyncio.gather(*[_fetch_gamerpower_one(p) for p in platforms])
     out, seen = [], set()
     for batch in results:
         for g in batch:
@@ -361,6 +406,26 @@ async def fetch_gamerpower_pc() -> list[dict]:
             seen.add(key)
             out.append(g)
     return out
+
+
+async def fetch_epic_full_description(slug: str) -> str:
+    if not slug:
+        return ""
+    url = f"https://store-content.ak.epicgames.com/api/it/content/products/{slug}"
+    sess = await get_session()
+    try:
+        async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+            text = await r.text()
+        m = re.search(r'"description"\s*:\s*"((?:[^"\\]|\\.){50,2000})"', text)
+        if m:
+            desc = m.group(1).encode("utf-8").decode("unicode_escape", errors="ignore")
+            return desc.strip()
+        m2 = re.search(r'"shortDescription"\s*:\s*"((?:[^"\\]|\\.){30,1500})"', text)
+        if m2:
+            return m2.group(1).encode("utf-8").decode("unicode_escape", errors="ignore").strip()
+    except Exception as e:
+        log.info("Epic content fetch fallita %s: %s", slug, e)
+    return ""
 
 
 async def fetch_epic_free() -> list[dict]:
@@ -414,10 +479,15 @@ async def fetch_epic_free() -> list[dict]:
             if img.get("type") in ("OfferImageWide", "DieselStoreFrontWide", "Thumbnail"):
                 image = img.get("url", "")
                 break
+        short_desc = (el.get("description") or "").strip()
+        long_desc = await fetch_epic_full_description(slug) if slug else ""
+        desc = long_desc or short_desc
+        if desc.lower() == title.lower():
+            desc = ""
         games.append({
             "id": f"epic_{normalize_title(title)}",
             "title": title,
-            "description": (el.get("description") or "").strip(),
+            "description": desc,
             "url": url_game,
             "image": image,
             "platform": "PC (Epic Games)",
@@ -425,6 +495,7 @@ async def fetch_epic_free() -> list[dict]:
             "source": "Epic Games",
             "worth": "N/A",
             "translate": False,
+            "categories": ["pc"],
         })
     return games
 
@@ -472,6 +543,7 @@ async def fetch_reddit_prime() -> list[dict]:
             "source": "Amazon Prime Gaming",
             "worth": "N/A",
             "translate": False,
+            "categories": ["pc"],
         })
     return games
 
@@ -479,7 +551,7 @@ async def fetch_reddit_prime() -> list[dict]:
 async def fetch_all_games() -> list[dict]:
     epic, gp, reddit = await asyncio.gather(
         fetch_epic_free(),
-        fetch_gamerpower_pc(),
+        fetch_gamerpower_all(),
         fetch_reddit_prime(),
     )
     seen, unique = set(), []
@@ -490,6 +562,17 @@ async def fetch_all_games() -> list[dict]:
         seen.add(key)
         unique.append(g)
     return unique
+
+
+def filter_by_categories(games: list[dict], wanted: set[str]) -> list[dict]:
+    if not wanted or "all" in wanted:
+        return games
+    out = []
+    for g in games:
+        cats = set(g.get("categories") or ["pc"])
+        if cats & wanted:
+            out.append(g)
+    return out
 
 
 def html_escape(text: str) -> str:
@@ -504,15 +587,26 @@ def format_game(g: dict) -> str:
     if len(desc) > 380:
         desc = desc[:377] + "..."
     source = g.get("source", "?")
+    cats = set(g.get("categories") or ["pc"])
     is_prime = "prime" in source.lower() or "amazon" in source.lower()
-    header = "🎁 GRATIS SU PRIME GAMING" if is_prime else "🎁 GRATIS SU PC"
+    if is_prime:
+        header = "🎁 GRATIS SU PRIME GAMING"
+    elif cats == {"console"}:
+        header = "🎁 GRATIS SU CONSOLE"
+    elif cats == {"android"}:
+        header = "🎁 GRATIS SU ANDROID"
+    elif "console" in cats and "pc" not in cats:
+        header = "🎁 GRATIS SU CONSOLE"
+    else:
+        header = "🎁 GRATIS SU PC"
     parts = [f"<b>{html_escape(header)}</b>", ""]
     parts.append(f"<b>{html_escape(title.upper())}</b>")
     if desc:
         parts.append("")
         parts.append(html_escape(desc))
     parts.append("")
-    tags = ["#PC", hashtag(source)]
+    plat_tag = "#PC" if "pc" in cats else ("#Console" if "console" in cats else "#Android")
+    tags = [plat_tag, hashtag(source)]
     line = " ".join(t for t in tags if t)
     price = format_price_eur(g.get("worth"))
     if price:
@@ -637,17 +731,58 @@ async def send_game(chat_id: int, g: dict):
 
 WELCOME_NEW = (
     "✅ <b>Iscrizione attivata!</b>\n\n"
-    "Riceverai qui ogni nuovo gioco PC gratuito appena disponibile "
-    "(Epic Games, GamerPower e altri).\n\n"
-    "Comandi:\n"
-    "• /giochi – mostra giochi gratis ora\n"
-    "• /status – stato iscrizione\n"
-    "• /stop – disiscriviti"
+    "Scegli per quali piattaforme vuoi ricevere notifiche di giochi gratis:"
 )
-WELCOME_ALREADY = "ℹ️ Questa chat è già iscritta. Usa /stop per disattivare o /giochi per vedere quelli attuali."
+WELCOME_ALREADY = (
+    "ℹ️ Questa chat è già iscritta.\n\n"
+    "Puoi cambiare le piattaforme qui sotto, oppure usare /stop o /giochi."
+)
+
+
+def platforms_keyboard(current: set[str]) -> dict:
+    def btn(label: str, code: str) -> dict:
+        mark = "✅ " if code in current else ""
+        return {"text": f"{mark}{label}", "callback_data": f"pref:{code}"}
+    return {
+        "inline_keyboard": [
+            [btn("🖥️ PC", "pc"), btn("🎮 Console", "console")],
+            [btn("📱 Android", "android"), btn("🌍 Tutti", "all")],
+            [{"text": "✔️ Conferma", "callback_data": "pref:done"}],
+        ]
+    }
 
 
 def handle_update(update: dict) -> Optional[dict]:
+    cb = update.get("callback_query")
+    if cb:
+        data = cb.get("data", "") or ""
+        chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id")
+        msg_id = (cb.get("message") or {}).get("message_id")
+        cb_id = cb.get("id")
+        if not chat_id or not data.startswith("pref:"):
+            return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+        code = data.split(":", 1)[1]
+        current = state.get_prefs(chat_id) or set()
+        if code == "all":
+            current = {"pc", "console", "android"}
+        elif code == "done":
+            if not current:
+                current = {"pc"}
+            state.set_prefs(chat_id, current)
+            labels = {"pc": "PC", "console": "Console", "android": "Android"}
+            chosen = ", ".join(labels[c] for c in ["pc", "console", "android"] if c in current) or "Nessuna"
+            asyncio.create_task(_finish_setup(chat_id, msg_id, chosen, cb_id))
+            return None
+        elif code in ("pc", "console", "android"):
+            if code in current:
+                current.discard(code)
+            else:
+                current.add(code)
+        else:
+            return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+        state.set_prefs(chat_id, current)
+        asyncio.create_task(_update_keyboard(chat_id, msg_id, current, cb_id))
+        return None
     msg = update.get("message") or update.get("edited_message") or update.get("channel_post")
     if msg:
         chat = msg.get("chat") or {}
@@ -667,13 +802,15 @@ def handle_update(update: dict) -> Optional[dict]:
         if not chat_id or not text:
             return None
         cmd = text.split()[0].lower().split("@")[0]
-        if cmd == "/start":
+        if cmd == "/start" or cmd == "/piattaforme":
             added = state.subscribe(chat_id)
+            current = state.get_prefs(chat_id)
             return {
                 "method": "sendMessage",
                 "chat_id": chat_id,
                 "text": WELCOME_NEW if added else WELCOME_ALREADY,
                 "parse_mode": "HTML",
+                "reply_markup": platforms_keyboard(current),
             }
         if cmd == "/stop":
             ok = state.unsubscribe(chat_id)
@@ -727,16 +864,57 @@ def handle_update(update: dict) -> Optional[dict]:
 async def _handle_giochi(chat_id: int):
     try:
         games = await fetch_all_games()
+        games = filter_by_categories(games, state.get_prefs(chat_id))
         if not games:
-            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratuito trovato al momento.")
+            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratuito trovato al momento per le piattaforme scelte. Usa /piattaforme per cambiarle.")
             return
-        for g in games[:10]:
+        for g in games[:12]:
             try:
                 await send_game(chat_id, g)
             except Exception as e:
                 log.warning("send_game fallito: %s", e)
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
+
+
+async def _update_keyboard(chat_id: int, msg_id: int, current: set[str], cb_id: str):
+    try:
+        await tg_api(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=msg_id,
+            reply_markup=platforms_keyboard(current),
+        )
+    except Exception as e:
+        log.warning("editMessageReplyMarkup fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id)
+    except Exception:
+        pass
+
+
+async def _finish_setup(chat_id: int, msg_id: int, chosen: str, cb_id: str):
+    try:
+        await tg_api(
+            "editMessageText",
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=(
+                f"✅ <b>Preferenze salvate</b>\n\nRiceverai giochi gratis per: <b>{html_escape(chosen)}</b>\n\n"
+                "Comandi:\n"
+                "• /giochi – giochi disponibili ora\n"
+                "• /piattaforme – cambia piattaforme\n"
+                "• /status – stato iscrizione\n"
+                "• /stop – disiscriviti"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.warning("editMessageText fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Preferenze salvate ✓")
+    except Exception:
+        pass
 
 
 async def broadcast_new_games():
@@ -747,10 +925,14 @@ async def broadcast_new_games():
         if not new:
             log.info("Nessun nuovo gioco.")
             return
-        log.info("Trovati %d nuovi giochi, invio a %d chat", len(new), len(state.chats))
+        log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
         for chat_id in list(state.chats):
-            for g in new:
+            prefs = state.get_prefs(chat_id)
+            chat_games = filter_by_categories(new, prefs)
+            if not chat_games:
+                continue
+            for g in chat_games:
                 try:
                     await send_game(chat_id, g)
                     await asyncio.sleep(0.3)
@@ -819,7 +1001,7 @@ async def setup_webhook(app: web.Application):
             "setWebhook",
             url=url,
             secret_token=WEBHOOK_SECRET,
-            allowed_updates=["message", "edited_message", "channel_post", "my_chat_member"],
+            allowed_updates=["message", "edited_message", "channel_post", "my_chat_member", "callback_query"],
             drop_pending_updates=False,
         )
         log.info("setWebhook: %s -> %s", url, resp)
