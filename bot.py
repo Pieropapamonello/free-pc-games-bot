@@ -456,7 +456,7 @@ def format_game(g: dict) -> str:
     is_prime = "prime" in source.lower() or "amazon" in source.lower()
     header = "🎁 GRATIS SU PRIME GAMING" if is_prime else "🎁 GRATIS SU PC"
     parts = [f"*{header}*", ""]
-    parts.append(f"*{title}*")
+    parts.append(f"*{title.upper()}*")
     if desc:
         parts.append("")
         parts.append(desc)
@@ -476,8 +476,67 @@ def format_game(g: dict) -> str:
     return "\n".join(parts)
 
 
+async def search_steam_trailer(title: str) -> Optional[str]:
+    sess = await get_session()
+    clean = clean_title(title)
+    try:
+        async with sess.get(
+            f"https://store.steampowered.com/api/storesearch/?term={clean}&cc=IT&l=italian",
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as r:
+            sr = await r.json(content_type=None)
+        items = sr.get("items") or []
+        if not items:
+            return None
+        appid = items[0].get("id")
+        if not appid:
+            return None
+        steam_title = normalize_title(items[0].get("name", ""))
+        if steam_title != normalize_title(clean):
+            wanted = set(normalize_title(clean).split())
+            found = set(steam_title.split())
+            if not wanted or len(wanted & found) / len(wanted) < 0.6:
+                return None
+        async with sess.get(
+            f"https://store.steampowered.com/api/appdetails?appids={appid}&l=italian&cc=IT",
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as r:
+            ad = await r.json(content_type=None)
+        det = (ad.get(str(appid)) or {}).get("data") or {}
+        movies = det.get("movies") or []
+        if not movies:
+            return None
+        m = next((x for x in movies if x.get("highlight")), movies[0])
+        mp4 = m.get("mp4") or {}
+        url = mp4.get("480") or mp4.get("max")
+        if not url and m.get("id"):
+            url = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
+        if url and url.startswith("//"):
+            url = "https:" + url
+        return url
+    except Exception as e:
+        log.info("Steam trailer non trovato per '%s': %s", title, e)
+        return None
+
+
 async def send_game(chat_id: int, g: dict):
     caption = format_game(g)
+    trailer = await search_steam_trailer(g["title"])
+    if trailer:
+        try:
+            r = await tg_api(
+                "sendVideo",
+                chat_id=chat_id,
+                video=trailer,
+                caption=caption,
+                parse_mode="Markdown",
+                supports_streaming=True,
+            )
+            if r.get("ok"):
+                return
+            log.info("sendVideo non OK, fallback foto: %s", r.get("description"))
+        except Exception as e:
+            log.warning("sendVideo fallita, fallback foto: %s", e)
     if g.get("image"):
         try:
             await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="Markdown")
