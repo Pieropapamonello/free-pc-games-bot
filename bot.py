@@ -492,8 +492,8 @@ async def fetch_all_games() -> list[dict]:
     return unique
 
 
-def md_escape(text: str) -> str:
-    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!\\])", r"\\\1", text)
+def html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def format_game(g: dict) -> str:
@@ -506,24 +506,24 @@ def format_game(g: dict) -> str:
     source = g.get("source", "?")
     is_prime = "prime" in source.lower() or "amazon" in source.lower()
     header = "🎁 GRATIS SU PRIME GAMING" if is_prime else "🎁 GRATIS SU PC"
-    parts = [f"*{header}*", ""]
-    parts.append(f"*{title.upper()}*")
+    parts = [f"<b>{html_escape(header)}</b>", ""]
+    parts.append(f"<b>{html_escape(title.upper())}</b>")
     if desc:
         parts.append("")
-        parts.append(desc)
+        parts.append(html_escape(desc))
     parts.append("")
     tags = ["#PC", hashtag(source)]
     line = " ".join(t for t in tags if t)
     price = format_price_eur(g.get("worth"))
     if price:
         line = f"{line}  ·  Valore {price}"
-    parts.append(line)
+    parts.append(html_escape(line))
     date = format_date_it(g.get("end_date"))
     if date:
-        parts.append(f"Scade il {date}")
+        parts.append(html_escape(f"Scade il {date}"))
     if g.get("url"):
         parts.append("")
-        parts.append(f"➜ [Scarica gratis]({g['url']})")
+        parts.append(f'➜ <a href="{html_escape(g["url"])}">Scarica gratis</a>')
     return "\n".join(parts)
 
 
@@ -580,7 +580,7 @@ async def send_game(chat_id: int, g: dict):
                 chat_id=chat_id,
                 video=trailer,
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 supports_streaming=True,
             )
             if r.get("ok"):
@@ -590,15 +590,15 @@ async def send_game(chat_id: int, g: dict):
             log.warning("sendVideo fallita, fallback foto: %s", e)
     if g.get("image"):
         try:
-            await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="Markdown")
+            await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="HTML")
             return
         except Exception as e:
             log.warning("sendPhoto fallita, fallback testo: %s", e)
-    await tg_api("sendMessage", chat_id=chat_id, text=caption, parse_mode="Markdown", disable_web_page_preview=False)
+    await tg_api("sendMessage", chat_id=chat_id, text=caption, parse_mode="HTML", disable_web_page_preview=False)
 
 
 WELCOME_NEW = (
-    "✅ *Iscrizione attivata!*\n\n"
+    "✅ <b>Iscrizione attivata!</b>\n\n"
     "Riceverai qui ogni nuovo gioco PC gratuito appena disponibile "
     "(Epic Games, GamerPower e altri).\n\n"
     "Comandi:\n"
@@ -635,7 +635,7 @@ def handle_update(update: dict) -> Optional[dict]:
                 "method": "sendMessage",
                 "chat_id": chat_id,
                 "text": WELCOME_NEW if added else WELCOME_ALREADY,
-                "parse_mode": "Markdown",
+                "parse_mode": "HTML",
             }
         if cmd == "/stop":
             ok = state.unsubscribe(chat_id)
