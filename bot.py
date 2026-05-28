@@ -570,6 +570,27 @@ async def search_steam_trailer(title: str) -> Optional[str]:
         return None
 
 
+async def search_youtube_video(query: str) -> Optional[str]:
+    sess = await get_session()
+    from urllib.parse import quote_plus
+    q = quote_plus(f"{query} gameplay trailer")
+    url = f"https://www.youtube.com/results?search_query={q}&hl=it&gl=IT"
+    try:
+        async with sess.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "it,en;q=0.7",
+        }) as r:
+            html = await r.text()
+    except Exception as e:
+        log.info("YouTube fetch fallita: %s", e)
+        return None
+    m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
+    if not m:
+        return None
+    vid = m.group(1)
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
 async def send_game(chat_id: int, g: dict):
     caption = format_game(g)
     trailer = await search_steam_trailer(g["title"])
@@ -585,9 +606,26 @@ async def send_game(chat_id: int, g: dict):
             )
             if r.get("ok"):
                 return
-            log.info("sendVideo non OK, fallback foto: %s", r.get("description"))
+            log.info("sendVideo non OK, fallback YouTube/foto: %s", r.get("description"))
         except Exception as e:
-            log.warning("sendVideo fallita, fallback foto: %s", e)
+            log.warning("sendVideo fallita, fallback YouTube/foto: %s", e)
+    yt = await search_youtube_video(clean_title(g["title"]))
+    if yt:
+        try:
+            text = f'🎬 <a href="{html_escape(yt)}">Guarda il trailer / gameplay su YouTube</a>\n\n{caption}'
+            r = await tg_api(
+                "sendMessage",
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=False,
+                link_preview_options={"url": yt, "prefer_large_media": True, "show_above_text": True},
+            )
+            if r.get("ok"):
+                return
+            log.info("sendMessage YouTube non OK, fallback foto: %s", r.get("description"))
+        except Exception as e:
+            log.warning("sendMessage YouTube fallita, fallback foto: %s", e)
     if g.get("image"):
         try:
             await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="HTML")
