@@ -309,7 +309,7 @@ async def fetch_json(url: str) -> Any:
         return await r.json(content_type=None)
 
 
-GAMERPOWER_PLATFORMS = ["pc", "epic-games-store", "steam", "gog", "ubisoft", "drm-free", "amazon"]
+GAMERPOWER_PLATFORMS = ["pc", "epic-games-store", "steam", "gog", "ubisoft", "drm-free"]
 
 
 async def _fetch_gamerpower_one(platform: str) -> list[dict]:
@@ -320,8 +320,13 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
     except Exception as e:
         log.warning("GamerPower fetch %s fallita: %s", platform, e)
         return []
+    if not isinstance(data, list):
+        log.info("GamerPower %s: nessun giveaway (%s)", platform, str(data)[:120])
+        return []
     games = []
     for it in data:
+        if not isinstance(it, dict):
+            continue
         if it.get("status", "").lower() != "active":
             continue
         title = (it.get("title") or "").strip()
