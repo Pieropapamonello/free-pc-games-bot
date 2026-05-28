@@ -115,13 +115,26 @@ def _roman_to_arabic(s: str) -> str:
     return s
 
 
+_NOISE_WORDS = {
+    "game", "free", "giveaway", "gratis", "gratuito", "mobile",
+    "pc", "steam", "epic", "epic games", "epicgames", "epic games mobile",
+    "gog", "ubisoft", "drm-free", "drm", "indiegala", "itch", "itchio",
+    "android", "ios", "switch", "ps4", "ps5", "xbox", "playstation",
+    "store", "key", "claim", "now", "psa", "fgf", "online", "edition",
+    "standalone", "deluxe", "complete", "premium", "ultimate",
+}
+
+
 def normalize_title(title: str) -> str:
     t = re.sub(r"\s*giveaway.*$", "", title, flags=re.IGNORECASE)
     t = re.sub(r"\s*\([^)]*\)\s*", " ", t)
+    t = re.sub(r"\s*\[[^\]]*\]\s*", " ", t)
     t = t.lower()
     t = re.sub(r"[^a-z0-9\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     t = _roman_to_arabic(t)
+    parts = [w for w in t.split() if w not in _NOISE_WORDS]
+    t = " ".join(parts) if parts else t
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -567,6 +580,18 @@ async def fetch_epic_free() -> list[dict]:
     return games
 
 
+def _clean_reddit_title(title: str) -> str:
+    t = title
+    for _ in range(5):
+        new = re.sub(r"^\s*\[[^\]]*\]\s*", "", t)
+        if new == t:
+            break
+        t = new
+    t = re.sub(r"^\s*\([A-Z][^)]*\)\s*", "", t)
+    t = re.sub(r"^\s*\([A-Z][^)]*\)\s*", "", t)
+    return t.strip()
+
+
 async def fetch_reddit_all() -> list[dict]:
     url = "https://www.reddit.com/r/FreeGameFindings/new/.json?limit=75"
     headers = {"User-Agent": "free-pc-games-bot/1.0 (telegram bot, contact: pieropapamonello)"}
@@ -591,33 +616,43 @@ async def fetch_reddit_all() -> list[dict]:
             continue
         if now - created > 7 * 86400:
             continue
-        haystack = f"{title} {flair} {link_url}".lower()
+        tl = title.lower()
+        if any(k in tl for k in ("fgf mod", "mod post", "free game findings application",
+                                 "mod announcement", "discussion", "weekly thread",
+                                 "subreddit", "free game findings community")):
+            continue
+        if any(k in flair for k in ("mod", "meta", "discussion", "announcement")):
+            continue
+        link_l = link_url.lower()
+        title_l = tl
         cats = []
         source = None
-        if ("prime" in haystack and ("gaming" in haystack or "amazon" in haystack)) \
-                or "luna.amazon" in haystack or "gaming.amazon" in haystack:
-            cats = ["pc"]
-            source = "Amazon Prime Gaming"
-        elif any(k in haystack for k in ["ps5", "ps4", "playstation", "psn", "store.playstation"]):
-            cats = ["console"]
-            source = "PlayStation Store"
-        elif any(k in haystack for k in ["xbox", "xbl", "microsoft store"]):
-            cats = ["console"]
-            source = "Xbox Store"
-        elif any(k in haystack for k in ["switch", "nintendo", "eshop"]):
-            cats = ["console"]
-            source = "Nintendo eShop"
-        elif any(k in haystack for k in ["android", "play store", "google play", "ios", "app store"]):
-            cats = ["android"]
-            source = "Mobile Store"
+        if "luna.amazon" in link_l or "gaming.amazon" in link_l:
+            cats, source = ["pc"], "Amazon Prime Gaming"
+        elif "prime" in title_l and ("gaming" in title_l or "amazon" in title_l):
+            cats, source = ["pc"], "Amazon Prime Gaming"
+        elif any(k in link_l for k in ("store.playstation", "psn.com")) or \
+             any(k in title_l for k in ("(ps5)", "(ps4)", "[ps5]", "[ps4]", "(playstation)", "[playstation]")):
+            cats, source = ["console"], "PlayStation Store"
+        elif "xbox.com" in link_l or any(k in title_l for k in ("(xbox)", "[xbox]", "xbox series", "xbox one")):
+            cats, source = ["console"], "Xbox Store"
+        elif any(k in link_l for k in ("nintendo.com", "ec.nintendo.com")) or \
+             any(k in title_l for k in ("(switch)", "[switch]", "(nintendo)", "[nintendo]", "nintendo eshop")):
+            cats, source = ["console"], "Nintendo eShop"
+        elif "play.google.com" in link_l or "apps.apple.com" in link_l or \
+             any(k in title_l for k in ("(android)", "[android]", "(ios)", "[ios]", "(mobile)", "[mobile]")):
+            cats, source = ["android"], "Mobile Store"
         else:
             continue
-        clean = re.sub(r"^\[PSA\]\s*\[PSA\]\s*", "", title, flags=re.IGNORECASE)
-        clean = re.sub(r"^\[PSA\]\s*", "", clean, flags=re.IGNORECASE)
-        desc = sel[:350] if sel else f"Gioco/i gratuiti su {source}. Riscatta dal link."
+        clean = _clean_reddit_title(title)
+        desc_raw = sel[:350].strip() if sel else ""
+        if desc_raw:
+            desc = translate_it(desc_raw)
+        else:
+            desc = f"Gioco gratuito su {source}. Riscatta dal link sotto."
         games.append({
             "id": f"reddit_{pd.get('id','')}",
-            "title": clean,
+            "title": clean or title,
             "description": desc,
             "url": link_url,
             "image": pd.get("thumbnail") if (pd.get("thumbnail","") or "").startswith("http") else "",
