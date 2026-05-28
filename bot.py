@@ -140,15 +140,26 @@ def format_price_eur(worth) -> Optional[str]:
 
 
 def format_date_it(s) -> Optional[str]:
-    if not s or s == "N/D":
+    if not s or str(s).upper() in ("N/D", "N/A", "NONE", ""):
         return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M UTC", "%d/%m/%Y"):
         try:
-            dt = datetime.strptime(s, fmt)
+            dt = datetime.strptime(str(s), fmt)
             return f"{dt.day} {MESI_IT[dt.month - 1]} {dt.year}"
         except ValueError:
             continue
-    return s
+    return str(s)
+
+
+def clean_title(t: str) -> str:
+    t = re.sub(r"\s+giveaway\s*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+\(steam giveaway\)\s*$", "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def hashtag(t: str) -> str:
+    s = re.sub(r"[^\w]+", "_", t).strip("_")
+    return f"#{s}" if s else ""
 
 
 USE_FIREBASE = bool(FIREBASE_URL and FIREBASE_SECRET)
@@ -414,24 +425,33 @@ def md_escape(text: str) -> str:
 
 
 def format_game(g: dict) -> str:
-    title = g["title"]
+    title = clean_title(g["title"])
     desc = g.get("description", "") or ""
     if g.get("translate", True):
         desc = translate_it(desc)
-    if len(desc) > 400:
-        desc = desc[:397] + "..."
-    parts = [f"🎮 *{title}*"]
+    if len(desc) > 380:
+        desc = desc[:377] + "..."
+    source = g.get("source", "?")
+    is_prime = "prime" in source.lower() or "amazon" in source.lower()
+    header = "🎁 GRATIS SU PRIME GAMING" if is_prime else "🎁 GRATIS SU PC"
+    parts = [f"*{header}*", ""]
+    parts.append(f"*{title}*")
     if desc:
-        parts.append(f"_{desc}_")
-    parts.append(f"🏢 {g.get('source','?')} • 💻 {g.get('platform','PC')}")
+        parts.append("")
+        parts.append(desc)
+    parts.append("")
+    tags = ["#PC", hashtag(source)]
+    line = " ".join(t for t in tags if t)
     price = format_price_eur(g.get("worth"))
     if price:
-        parts.append(f"💰 Valore: {price}")
+        line = f"{line}  ·  Valore {price}"
+    parts.append(line)
     date = format_date_it(g.get("end_date"))
     if date:
-        parts.append(f"⏰ Riscatta entro: {date}")
+        parts.append(f"Scade il {date}")
     if g.get("url"):
-        parts.append(f"▶️ [Scarica Gratis]({g['url']})")
+        parts.append("")
+        parts.append(f"➜ [Scarica gratis]({g['url']})")
     return "\n".join(parts)
 
 
