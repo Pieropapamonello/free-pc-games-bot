@@ -1,3 +1,4 @@
 aiohttp==3.10.10
 python-dotenv==1.0.1
 deep-translator==1.11.4
+yt-dlp==2024.11.4

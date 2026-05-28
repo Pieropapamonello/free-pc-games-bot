@@ -13,6 +13,12 @@ from aiohttp import web
 from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 
+try:
+    import yt_dlp
+    _YTDLP_OK = True
+except Exception:
+    _YTDLP_OK = False
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -794,6 +800,40 @@ async def search_steam_trailer(title: str) -> Optional[str]:
         return None
 
 
+def _ytdlp_extract_mp4_sync(youtube_url: str) -> Optional[str]:
+    if not _YTDLP_OK:
+        return None
+    opts = {
+        "format": "best[ext=mp4][height<=480][filesize<19M]/best[ext=mp4][height<=360]/best[height<=480][ext=mp4]",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "skip_download": True,
+        "socket_timeout": 12,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(youtube_url, download=False)
+            return info.get("url")
+    except Exception as e:
+        log.info("yt-dlp extract fallita per %s: %s", youtube_url, e)
+        return None
+
+
+async def extract_youtube_mp4(youtube_url: str) -> Optional[str]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_ytdlp_extract_mp4_sync, youtube_url),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        log.info("yt-dlp timeout per %s", youtube_url)
+        return None
+    except Exception as e:
+        log.info("yt-dlp errore: %s", e)
+        return None
+
+
 async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
     """Restituisce (video_url, thumbnail_url) oppure None."""
     sess = await get_session()
@@ -840,6 +880,22 @@ async def send_game(chat_id: int, g: dict):
     yt = await search_youtube_video(clean_title(g["title"]))
     if yt:
         yt_url, yt_thumb = yt
+        mp4 = await extract_youtube_mp4(yt_url)
+        if mp4:
+            try:
+                r = await tg_api(
+                    "sendVideo",
+                    chat_id=chat_id,
+                    video=mp4,
+                    caption=caption,
+                    parse_mode="HTML",
+                    supports_streaming=True,
+                )
+                if r.get("ok"):
+                    return
+                log.info("sendVideo YouTube mp4 non OK: %s", r.get("description"))
+            except Exception as e:
+                log.warning("sendVideo YouTube mp4 fallita: %s", e)
         try:
             r = await tg_api(
                 "sendPhoto",
