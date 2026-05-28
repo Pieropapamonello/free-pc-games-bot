@@ -22,6 +22,8 @@ PING_SECRET = os.getenv("PING_SECRET", "")
 USD_TO_EUR = float(os.getenv("USD_TO_EUR", "0.92"))
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_urlsafe(24)
+FIREBASE_URL = os.getenv("FIREBASE_URL", "").rstrip("/")
+FIREBASE_SECRET = os.getenv("FIREBASE_SECRET", "")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,51 @@ def load_json_set(path: Path) -> set:
 def save_json_set(path: Path, data: set) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(list(data), f, ensure_ascii=False, indent=2)
+
+
+def _firebase_url(path: str) -> str:
+    return f"{FIREBASE_URL}/{path}.json?auth={FIREBASE_SECRET}"
+
+
+def firebase_get(path: str) -> dict:
+    import urllib.request
+    req = urllib.request.Request(_firebase_url(path), method="GET")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = r.read()
+        return json.loads(data) if data else {}
+
+
+def firebase_put(path: str, value) -> None:
+    import urllib.request
+    body = json.dumps(value).encode("utf-8")
+    req = urllib.request.Request(
+        _firebase_url(path),
+        data=body,
+        method="PUT",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
+
+
+def firebase_patch(path: str, value: dict) -> None:
+    import urllib.request
+    body = json.dumps(value).encode("utf-8")
+    req = urllib.request.Request(
+        _firebase_url(path),
+        data=body,
+        method="PATCH",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
+
+
+def firebase_delete(path: str) -> None:
+    import urllib.request
+    req = urllib.request.Request(_firebase_url(path), method="DELETE")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
 
 
 def normalize_title(title: str) -> str:
@@ -104,28 +151,89 @@ def format_date_it(s) -> Optional[str]:
     return s
 
 
+USE_FIREBASE = bool(FIREBASE_URL and FIREBASE_SECRET)
+
+
 class State:
     def __init__(self):
-        self.chats: set[int] = {int(x) for x in load_json_set(CHATS_FILE)}
-        self.sent: set[str] = load_json_set(SENT_FILE)
+        self.chats: set[int] = set()
+        self.sent: set[str] = set()
+        self._load()
+
+    def _load(self):
+        if USE_FIREBASE:
+            try:
+                chats = firebase_get("chats") or {}
+                sent = firebase_get("sent") or {}
+                self.chats = {int(k) for k in chats.keys()} if isinstance(chats, dict) else set()
+                self.sent = set(sent.keys()) if isinstance(sent, dict) else set()
+                log.info("Stato caricato da Firebase: %d chat, %d giochi inviati", len(self.chats), len(self.sent))
+                return
+            except Exception as e:
+                log.error("Firebase load fallita: %s — fallback a file", e)
+        self.chats = {int(x) for x in load_json_set(CHATS_FILE)}
+        self.sent = load_json_set(SENT_FILE)
+
+    def _save_chats(self):
+        if USE_FIREBASE:
+            try:
+                firebase_put("chats", {str(c): True for c in self.chats})
+                return
+            except Exception as e:
+                log.warning("Firebase save chats fallita: %s", e)
+        save_json_set(CHATS_FILE, self.chats)
+
+    def _save_sent(self):
+        if USE_FIREBASE:
+            try:
+                firebase_put("sent", {str(s): True for s in self.sent})
+                return
+            except Exception as e:
+                log.warning("Firebase save sent fallita: %s", e)
+        save_json_set(SENT_FILE, self.sent)
 
     def save(self):
-        save_json_set(CHATS_FILE, self.chats)
-        save_json_set(SENT_FILE, self.sent)
+        self._save_chats()
+        self._save_sent()
 
     def subscribe(self, chat_id: int) -> bool:
         if chat_id in self.chats:
             return False
         self.chats.add(chat_id)
-        save_json_set(CHATS_FILE, self.chats)
+        if USE_FIREBASE:
+            try:
+                firebase_patch("chats", {str(chat_id): True})
+                return True
+            except Exception as e:
+                log.warning("Firebase patch chat fallita: %s", e)
+        self._save_chats()
         return True
 
     def unsubscribe(self, chat_id: int) -> bool:
         if chat_id not in self.chats:
             return False
         self.chats.discard(chat_id)
-        save_json_set(CHATS_FILE, self.chats)
+        if USE_FIREBASE:
+            try:
+                firebase_delete(f"chats/{chat_id}")
+                return True
+            except Exception as e:
+                log.warning("Firebase delete chat fallita: %s", e)
+        self._save_chats()
         return True
+
+    def mark_sent(self, game_ids: list[str]):
+        if not game_ids:
+            return
+        for gid in game_ids:
+            self.sent.add(gid)
+        if USE_FIREBASE:
+            try:
+                firebase_patch("sent", {str(g): True for g in game_ids})
+                return
+            except Exception as e:
+                log.warning("Firebase patch sent fallita: %s", e)
+        self._save_sent()
 
 
 state = State()
@@ -464,10 +572,8 @@ async def broadcast_new_games():
                         break
                     log.warning("Errore invio chat %s: %s", chat_id, e)
         for cid in dead:
-            state.chats.discard(cid)
-        for g in new:
-            state.sent.add(g["id"])
-        state.save()
+            state.unsubscribe(cid)
+        state.mark_sent([g["id"] for g in new])
     except Exception as e:
         log.exception("Errore broadcast: %s", e)
 
