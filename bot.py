@@ -567,8 +567,8 @@ async def fetch_epic_free() -> list[dict]:
     return games
 
 
-async def fetch_reddit_prime() -> list[dict]:
-    url = "https://www.reddit.com/r/FreeGameFindings/new/.json?limit=50"
+async def fetch_reddit_all() -> list[dict]:
+    url = "https://www.reddit.com/r/FreeGameFindings/new/.json?limit=75"
     headers = {"User-Agent": "free-pc-games-bot/1.0 (telegram bot, contact: pieropapamonello)"}
     sess = await get_session()
     try:
@@ -584,7 +584,7 @@ async def fetch_reddit_prime() -> list[dict]:
         pd = p.get("data") or {}
         title = (pd.get("title") or "").strip()
         link_url = pd.get("url", "") or ""
-        flair = pd.get("link_flair_text", "") or ""
+        flair = (pd.get("link_flair_text", "") or "").lower()
         sel = (pd.get("selftext") or "").strip()
         created = pd.get("created_utc", 0)
         if not title or not link_url:
@@ -592,25 +592,41 @@ async def fetch_reddit_prime() -> list[dict]:
         if now - created > 7 * 86400:
             continue
         haystack = f"{title} {flair} {link_url}".lower()
-        is_prime = ("prime" in haystack and ("gaming" in haystack or "amazon" in haystack)) \
-                   or "luna.amazon" in haystack or "gaming.amazon" in haystack
-        if not is_prime:
+        cats = []
+        source = None
+        if ("prime" in haystack and ("gaming" in haystack or "amazon" in haystack)) \
+                or "luna.amazon" in haystack or "gaming.amazon" in haystack:
+            cats = ["pc"]
+            source = "Amazon Prime Gaming"
+        elif any(k in haystack for k in ["ps5", "ps4", "playstation", "psn", "store.playstation"]):
+            cats = ["console"]
+            source = "PlayStation Store"
+        elif any(k in haystack for k in ["xbox", "xbl", "microsoft store"]):
+            cats = ["console"]
+            source = "Xbox Store"
+        elif any(k in haystack for k in ["switch", "nintendo", "eshop"]):
+            cats = ["console"]
+            source = "Nintendo eShop"
+        elif any(k in haystack for k in ["android", "play store", "google play", "ios", "app store"]):
+            cats = ["android"]
+            source = "Mobile Store"
+        else:
             continue
         clean = re.sub(r"^\[PSA\]\s*\[PSA\]\s*", "", title, flags=re.IGNORECASE)
         clean = re.sub(r"^\[PSA\]\s*", "", clean, flags=re.IGNORECASE)
-        desc = sel[:350] if sel else "Vari giochi gratuiti questa settimana per chi ha Amazon Prime. Riscatta dal link."
+        desc = sel[:350] if sel else f"Gioco/i gratuiti su {source}. Riscatta dal link."
         games.append({
             "id": f"reddit_{pd.get('id','')}",
             "title": clean,
             "description": desc,
             "url": link_url,
             "image": pd.get("thumbnail") if (pd.get("thumbnail","") or "").startswith("http") else "",
-            "platform": "PC",
+            "platform": ", ".join(c.upper() for c in cats),
             "end_date": "N/A",
-            "source": "Amazon Prime Gaming",
+            "source": source,
             "worth": "N/A",
             "translate": False,
-            "categories": ["pc"],
+            "categories": cats,
             "genres": detect_genres(clean, desc),
         })
     return games
@@ -620,7 +636,7 @@ async def fetch_all_games() -> list[dict]:
     epic, gp, reddit = await asyncio.gather(
         fetch_epic_free(),
         fetch_gamerpower_all(),
-        fetch_reddit_prime(),
+        fetch_reddit_all(),
     )
     seen, unique = set(), []
     for g in epic + gp + reddit:
