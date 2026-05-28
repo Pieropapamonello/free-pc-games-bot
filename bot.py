@@ -102,10 +102,26 @@ def firebase_delete(path: str) -> None:
         r.read()
 
 
+ROMAN_TO_ARAB = [
+    ("xii", "12"), ("xi", "11"), ("ix", "9"), ("viii", "8"),
+    ("vii", "7"), ("vi", "6"), ("iv", "4"), ("iii", "3"),
+    ("ii", "2"), ("v", "5"), ("x", "10"), ("i", "1"),
+]
+
+
+def _roman_to_arabic(s: str) -> str:
+    for rom, ara in ROMAN_TO_ARAB:
+        s = re.sub(rf"\b{rom}\b", ara, s)
+    return s
+
+
 def normalize_title(title: str) -> str:
     t = re.sub(r"\s*giveaway.*$", "", title, flags=re.IGNORECASE)
-    t = re.sub(r"\s*\([^)]*\)\s*", "", t)
-    t = re.sub(r"[^\w\s]", "", t.lower())
+    t = re.sub(r"\s*\([^)]*\)\s*", " ", t)
+    t = t.lower()
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = _roman_to_arabic(t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
