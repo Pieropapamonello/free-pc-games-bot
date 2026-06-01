@@ -599,12 +599,19 @@ def _clean_reddit_title(title: str) -> str:
 
 
 async def fetch_reddit_all() -> list[dict]:
-    url = "https://www.reddit.com/r/FreeGameFindings/new/.json?limit=75"
-    headers = {"User-Agent": "free-pc-games-bot/1.0 (telegram bot, contact: pieropapamonello)"}
+    url = "https://www.reddit.com/r/FreeGameFindings/new.json?limit=75&raw_json=1"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) free-pc-games-bot/1.0",
+        "Accept": "application/json",
+    }
     sess = await get_session()
     try:
         async with sess.get(url, headers=headers) as r:
-            data = await r.json(content_type=None)
+            text = await r.text()
+        if not text.strip().startswith("{"):
+            log.warning("Reddit non-JSON (rate-limit?), salto: %s", text[:80])
+            return []
+        data = json.loads(text)
     except Exception as e:
         log.warning("Reddit fetch fallita: %s", e)
         return []
@@ -800,8 +807,12 @@ async def search_steam_trailer(title: str) -> Optional[str]:
         return None
 
 
+_YT_BLOCKED = False  # diventa True se YouTube blocca l'IP (datacenter) per evitare retry inutili
+
+
 def _ytdlp_extract_mp4_sync(youtube_url: str) -> Optional[str]:
-    if not _YTDLP_OK:
+    global _YT_BLOCKED
+    if not _YTDLP_OK or _YT_BLOCKED:
         return None
     opts = {
         "format": "best[ext=mp4][height<=480][filesize<19M]/best[ext=mp4][height<=360]/best[height<=480][ext=mp4]",
@@ -810,13 +821,20 @@ def _ytdlp_extract_mp4_sync(youtube_url: str) -> Optional[str]:
         "noprogress": True,
         "skip_download": True,
         "socket_timeout": 12,
+        # client mobile: a volte aggira il "Sign in to confirm you're not a bot" sui datacenter
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
             return info.get("url")
     except Exception as e:
-        log.info("yt-dlp extract fallita per %s: %s", youtube_url, e)
+        emsg = str(e)
+        if "Sign in to confirm" in emsg or "not a bot" in emsg:
+            _YT_BLOCKED = True
+            log.warning("YouTube blocca l'IP per estrazione video: disabilito yt-dlp (uso thumbnail+link)")
+        else:
+            log.info("yt-dlp extract fallita per %s: %s", youtube_url, emsg[:120])
         return None
 
 
