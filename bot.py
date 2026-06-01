@@ -715,7 +715,7 @@ def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_game(g: dict) -> str:
+def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
     title = clean_title(g["title"])
     desc = g.get("description", "") or ""
     if g.get("translate", True):
@@ -740,6 +740,9 @@ def format_game(g: dict) -> str:
     if desc:
         parts.append("")
         parts.append(html_escape(desc))
+    if trailer_url:
+        parts.append("")
+        parts.append(f"🎬 Trailer: {html_escape(trailer_url)}")
     parts.append("")
     plat_tag = "#PC" if "pc" in cats else ("#Console" if "console" in cats else "#Android")
     tags = [plat_tag, hashtag(source)]
@@ -751,9 +754,6 @@ def format_game(g: dict) -> str:
     date = format_date_it(g.get("end_date"))
     if date:
         parts.append(html_escape(f"Scade il {date}"))
-    if g.get("url"):
-        parts.append("")
-        parts.append(f'➜ <a href="{html_escape(g["url"])}">Scarica gratis</a>')
     return "\n".join(parts)
 
 
@@ -859,68 +859,59 @@ async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
     )
 
 
+def _download_button(g: dict) -> Optional[dict]:
+    url = g.get("url")
+    if not url:
+        return None
+    return {"inline_keyboard": [[{"text": "⬇️ Scarica gioco", "url": url}]]}
+
+
 async def send_game(chat_id: int, g: dict):
-    caption = format_game(g)
-    trailer = await search_steam_trailer(g["title"])
-    if trailer:
+    yt = await search_youtube_video(clean_title(g["title"]))
+    yt_url = yt[0] if yt else None
+    yt_thumb = yt[1] if yt else None
+    caption = format_game(g, trailer_url=yt_url)
+    button = _download_button(g)
+    mp4 = None
+    if yt_url:
+        mp4 = await extract_youtube_mp4(yt_url)
+    if not mp4:
+        mp4 = await search_steam_trailer(g["title"])
+    if mp4:
         try:
-            r = await tg_api(
-                "sendVideo",
+            payload = dict(
                 chat_id=chat_id,
-                video=trailer,
+                video=mp4,
                 caption=caption,
                 parse_mode="HTML",
                 supports_streaming=True,
             )
+            if button:
+                payload["reply_markup"] = button
+            r = await tg_api("sendVideo", **payload)
             if r.get("ok"):
                 return
-            log.info("sendVideo non OK, fallback YouTube/foto: %s", r.get("description"))
+            log.info("sendVideo non OK, fallback foto: %s", r.get("description"))
         except Exception as e:
-            log.warning("sendVideo fallita, fallback YouTube/foto: %s", e)
-    yt = await search_youtube_video(clean_title(g["title"]))
-    if yt:
-        yt_url, yt_thumb = yt
-        mp4 = await extract_youtube_mp4(yt_url)
-        if mp4:
-            try:
-                r = await tg_api(
-                    "sendVideo",
-                    chat_id=chat_id,
-                    video=mp4,
-                    caption=caption,
-                    parse_mode="HTML",
-                    supports_streaming=True,
-                )
-                if r.get("ok"):
-                    return
-                log.info("sendVideo YouTube mp4 non OK: %s", r.get("description"))
-            except Exception as e:
-                log.warning("sendVideo YouTube mp4 fallita: %s", e)
+            log.warning("sendVideo fallita, fallback foto: %s", e)
+    photo = yt_thumb or g.get("image")
+    if photo:
         try:
-            r = await tg_api(
-                "sendPhoto",
-                chat_id=chat_id,
-                photo=yt_thumb,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup={
-                    "inline_keyboard": [[
-                        {"text": "▶️ Guarda trailer", "url": yt_url},
-                    ]]
-                },
-            )
+            payload = dict(chat_id=chat_id, photo=photo, caption=caption, parse_mode="HTML")
+            if button:
+                payload["reply_markup"] = button
+            r = await tg_api("sendPhoto", **payload)
             if r.get("ok"):
                 return
-            log.info("sendPhoto YouTube thumb non OK: %s", r.get("description"))
-        except Exception as e:
-            log.warning("sendPhoto YouTube thumb fallita: %s", e)
-    if g.get("image"):
-        try:
-            await tg_api("sendPhoto", chat_id=chat_id, photo=g["image"], caption=caption, parse_mode="HTML")
-            return
+            log.info("sendPhoto non OK, fallback testo: %s", r.get("description"))
         except Exception as e:
             log.warning("sendPhoto fallita, fallback testo: %s", e)
-    await tg_api("sendMessage", chat_id=chat_id, text=caption, parse_mode="HTML", disable_web_page_preview=False)
+    payload = dict(
+        chat_id=chat_id, text=caption, parse_mode="HTML", disable_web_page_preview=False
+    )
+    if button:
+        payload["reply_markup"] = button
+    await tg_api("sendMessage", **payload)
 
 
 WELCOME_NEW = (
