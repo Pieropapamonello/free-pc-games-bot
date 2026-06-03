@@ -735,22 +735,27 @@ async def fetch_prime_gaming() -> list[dict]:
     if not html:
         log.warning("Prime Gaming: nessuna lista recuperata da gg.deals")
         return []
-    titles = _parse_ggdeals_games(html)
+    titles = _parse_ggdeals_games(html)[:25]
     log.info("Prime Gaming: %d giochi trovati su gg.deals", len(titles))
+    steam_infos = await asyncio.gather(*[steam_lookup(t) for t in titles], return_exceptions=True)
+    generic = "Gioco gratuito incluso con l'abbonamento Amazon Prime. Riscattalo dall'app Prime Gaming / Amazon Luna."
     games = []
-    for t in titles[:25]:
-        desc = "Gioco gratuito incluso con l'abbonamento Amazon Prime. Riscattalo dall'app Prime Gaming / Amazon Luna."
+    for t, info in zip(titles, steam_infos):
+        if isinstance(info, Exception):
+            info = None
+        desc = (info or {}).get("description") or generic
+        image = (info or {}).get("image") or ""
         games.append({
             "id": f"prime_{normalize_title(t)}",
             "title": t,
             "description": desc,
             "url": "https://gaming.amazon.com/home",
-            "image": "",
+            "image": image,
             "platform": "PC (Amazon Prime)",
             "end_date": "N/A",
             "source": "Amazon Prime Gaming",
             "worth": "N/A",
-            "translate": False,
+            "translate": True,
             "categories": ["pc"],
             "genres": detect_genres(t, desc),
         })
@@ -842,9 +847,18 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
     return "\n".join(parts)
 
 
-async def search_steam_trailer(title: str) -> Optional[str]:
-    sess = await get_session()
+_steam_cache: dict[str, Optional[dict]] = {}
+
+
+async def steam_lookup(title: str) -> Optional[dict]:
+    """Cerca il gioco su Steam (match titolo) e restituisce
+    {appid, description, image, trailer} oppure None. Risultato in cache."""
     clean = clean_title(title)
+    key = normalize_title(clean)
+    if key in _steam_cache:
+        return _steam_cache[key]
+    sess = await get_session()
+    result = None
     try:
         async with sess.get(
             f"https://store.steampowered.com/api/storesearch/?term={clean}&cc=IT&l=italian",
@@ -852,37 +866,44 @@ async def search_steam_trailer(title: str) -> Optional[str]:
         ) as r:
             sr = await r.json(content_type=None)
         items = sr.get("items") or []
-        if not items:
-            return None
-        appid = items[0].get("id")
-        if not appid:
-            return None
-        steam_title = normalize_title(items[0].get("name", ""))
-        if steam_title != normalize_title(clean):
-            wanted = set(normalize_title(clean).split())
-            found = set(steam_title.split())
-            if not wanted or len(wanted & found) / len(wanted) < 0.6:
-                return None
-        async with sess.get(
-            f"https://store.steampowered.com/api/appdetails?appids={appid}&l=italian&cc=IT",
-            headers={"User-Agent": "Mozilla/5.0"},
-        ) as r:
-            ad = await r.json(content_type=None)
-        det = (ad.get(str(appid)) or {}).get("data") or {}
-        movies = det.get("movies") or []
-        if not movies:
-            return None
-        m = next((x for x in movies if x.get("highlight")), movies[0])
-        mp4 = m.get("mp4") or {}
-        url = mp4.get("480") or mp4.get("max")
-        if not url and m.get("id"):
-            url = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
-        if url and url.startswith("//"):
-            url = "https:" + url
-        return url
+        appid = items[0].get("id") if items else None
+        if appid:
+            steam_title = normalize_title(items[0].get("name", ""))
+            ok = steam_title == key
+            if not ok:
+                wanted = set(key.split())
+                found = set(steam_title.split())
+                ok = bool(wanted) and len(wanted & found) / len(wanted) >= 0.6
+            if ok:
+                async with sess.get(
+                    f"https://store.steampowered.com/api/appdetails?appids={appid}&l=italian&cc=IT",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as r:
+                    ad = await r.json(content_type=None)
+                det = (ad.get(str(appid)) or {}).get("data") or {}
+                desc = (det.get("short_description") or "").strip()
+                image = det.get("header_image") or ""
+                trailer = None
+                movies = det.get("movies") or []
+                if movies:
+                    m = next((x for x in movies if x.get("highlight")), movies[0])
+                    mp4 = m.get("mp4") or {}
+                    trailer = mp4.get("480") or mp4.get("max")
+                    if not trailer and m.get("id"):
+                        trailer = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
+                    if trailer and trailer.startswith("//"):
+                        trailer = "https:" + trailer
+                result = {"appid": appid, "description": desc, "image": image, "trailer": trailer}
     except Exception as e:
-        log.info("Steam trailer non trovato per '%s': %s", title, e)
-        return None
+        log.info("Steam lookup fallito per '%s': %s", title, e)
+        result = None
+    _steam_cache[key] = result
+    return result
+
+
+async def search_steam_trailer(title: str) -> Optional[str]:
+    info = await steam_lookup(title)
+    return info.get("trailer") if info else None
 
 
 _YT_BLOCKED = False  # diventa True se YouTube blocca l'IP (datacenter) per evitare retry inutili
