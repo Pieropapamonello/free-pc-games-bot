@@ -30,6 +30,7 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_urlsafe(24)
 FIREBASE_URL = os.getenv("FIREBASE_URL", "").rstrip("/")
 FIREBASE_SECRET = os.getenv("FIREBASE_SECRET", "")
+RAWG_KEY = os.getenv("RAWG_KEY", "")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -812,13 +813,24 @@ async def fetch_prime_gaming() -> list[dict]:
     titles = _parse_ggdeals_games(html)[:25]
     log.info("Prime Gaming: %d giochi trovati su gg.deals", len(titles))
     steam_infos = await asyncio.gather(*[steam_lookup(t) for t in titles], return_exceptions=True)
+    # per i titoli dove Steam non ha dato descrizione, prova RAWG (se configurato)
+    need_rawg = [
+        t for t, info in zip(titles, steam_infos)
+        if not (isinstance(info, dict) and info.get("description"))
+    ]
+    rawg_results = {}
+    if RAWG_KEY and need_rawg:
+        rl = await asyncio.gather(*[rawg_lookup(t) for t in need_rawg], return_exceptions=True)
+        for t, info in zip(need_rawg, rl):
+            rawg_results[t] = info if isinstance(info, dict) else None
     generic = "Gioco gratuito incluso con l'abbonamento Amazon Prime. Riscattalo dall'app Prime Gaming / Amazon Luna."
     games = []
     for t, info in zip(titles, steam_infos):
         if isinstance(info, Exception):
             info = None
-        desc = (info or {}).get("description") or generic
-        image = (info or {}).get("image") or ""
+        rawg = rawg_results.get(t) or {}
+        desc = (info or {}).get("description") or rawg.get("description") or generic
+        image = (info or {}).get("image") or rawg.get("image") or ""
         price = (info or {}).get("price") or "N/A"
         games.append({
             "id": f"prime_{normalize_title(t)}",
@@ -938,6 +950,52 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
     elif is_prime:
         parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
     return "\n".join(parts)
+
+
+_rawg_cache: dict[str, Optional[dict]] = {}
+
+
+async def rawg_lookup(title: str) -> Optional[dict]:
+    """Fallback descrizione/immagine da RAWG (se RAWG_KEY impostata). Cache per titolo."""
+    if not RAWG_KEY:
+        return None
+    clean = clean_title(title)
+    key = normalize_title(clean)
+    if key in _rawg_cache:
+        return _rawg_cache[key]
+    sess = await get_session()
+    result = None
+    try:
+        from urllib.parse import quote_plus
+        async with sess.get(
+            f"https://api.rawg.io/api/games?key={RAWG_KEY}&search={quote_plus(clean)}&page_size=5",
+            headers={"User-Agent": "free-pc-games-bot/1.0"},
+        ) as r:
+            data = await r.json(content_type=None)
+        for item in (data.get("results") or [])[:5]:
+            name = normalize_title(item.get("name", ""))
+            wanted = set(key.split())
+            found = set(name.split())
+            if name == key or (wanted and len(wanted & found) / len(wanted) >= 0.6):
+                slug = item.get("slug")
+                image = item.get("background_image") or ""
+                desc = ""
+                if slug:
+                    async with sess.get(
+                        f"https://api.rawg.io/api/games/{slug}?key={RAWG_KEY}",
+                        headers={"User-Agent": "free-pc-games-bot/1.0"},
+                    ) as r2:
+                        det = await r2.json(content_type=None)
+                    desc = (det.get("description_raw") or "").strip()
+                    if len(desc) > 400:
+                        desc = desc[:397] + "..."
+                result = {"description": desc, "image": image}
+                break
+    except Exception as e:
+        log.info("RAWG lookup fallito per '%s': %s", title, e)
+        result = None
+    _rawg_cache[key] = result
+    return result
 
 
 _steam_cache: dict[str, Optional[dict]] = {}
@@ -1368,6 +1426,21 @@ def handle_update(update: dict) -> Optional[dict]:
                 "chat_id": chat_id,
                 "text": "🔎 Cerco giochi gratuiti…",
             }
+        if cmd == "/cerca":
+            query = text.split(None, 1)
+            if len(query) < 2 or len(query[1].strip()) < 2:
+                return {
+                    "method": "sendMessage",
+                    "chat_id": chat_id,
+                    "text": "Scrivi cosa cercare dopo il comando, es:\n<code>/cerca tomb raider</code>",
+                    "parse_mode": "HTML",
+                }
+            asyncio.create_task(_handle_cerca(chat_id, query[1].strip()))
+            return {
+                "method": "sendMessage",
+                "chat_id": chat_id,
+                "text": f"🔎 Cerco «{query[1].strip()}» tra i giochi gratis…",
+            }
         return None
     cmu = update.get("my_chat_member")
     if cmu:
@@ -1407,6 +1480,32 @@ async def _handle_giochi(chat_id: int):
                 log.warning("send_game fallito: %s", e)
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
+
+
+async def _handle_cerca(chat_id: int, query: str):
+    try:
+        q = normalize_title(query)
+        qwords = set(q.split())
+        games = await fetch_all_games()
+        matches = []
+        for g in games:
+            nt = normalize_title(g["title"])
+            if q and (q in nt or (qwords and qwords <= set(nt.split()))):
+                matches.append(g)
+        if not matches:
+            await tg_api(
+                "sendMessage",
+                chat_id=chat_id,
+                text=f"Nessun gioco gratis trovato per «{query}». Prova con un nome diverso o /giochi per vedere tutti.",
+            )
+            return
+        for g in matches[:8]:
+            try:
+                await send_game(chat_id, g)
+            except Exception as e:
+                log.warning("send_game (cerca) fallito: %s", e)
+    except Exception as e:
+        log.exception("Errore /cerca: %s", e)
 
 
 async def _update_keyboard(chat_id: int, msg_id: int, current: set[str], cb_id: str):
@@ -1631,6 +1730,7 @@ async def setup_commands():
     try:
         await tg_api("setMyCommands", commands=[
             {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
+            {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
             {"command": "piattaforme", "description": "Scegli PC / Console / Android"},
             {"command": "contenuti", "description": "Giochi, DLC, Abbonamenti"},
             {"command": "generi", "description": "Filtra per genere"},
