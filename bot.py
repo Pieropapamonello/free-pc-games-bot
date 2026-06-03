@@ -680,14 +680,92 @@ async def fetch_reddit_all() -> list[dict]:
     return games
 
 
+MONTHS_EN = ["january", "february", "march", "april", "may", "june",
+             "july", "august", "september", "october", "november", "december"]
+GGDEALS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+
+def _parse_ggdeals_games(html: str) -> list[str]:
+    links = re.findall(r'<a[^>]+href="(/game/[^"]+)"[^>]*>(.*?)</a>', html, re.S)
+    titles, seen = [], set()
+    for _href, txt in links:
+        t = re.sub(r"<[^>]+>", "", txt).strip()
+        t = t.replace("&amp;", "&").replace("&#039;", "'").replace("&quot;", '"')
+        if not t or "Discount" in t or "Cheapest price" in t:
+            continue
+        key = normalize_title(t)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        titles.append(t)
+    return titles
+
+
+async def fetch_prime_gaming() -> list[dict]:
+    sess = await get_session()
+    now = datetime.now(timezone.utc)
+    html = None
+    direct = (
+        f"https://gg.deals/subscription-news/prime-gaming-amazon-luna-"
+        f"{MONTHS_EN[now.month - 1]}-{now.year}-full-list-of-free-games-for-the-month/"
+    )
+    try:
+        async with sess.get(direct, headers={"User-Agent": GGDEALS_UA}) as r:
+            if r.status == 200:
+                html = await r.text()
+    except Exception as e:
+        log.info("gg.deals URL diretto fallito: %s", e)
+    if not html:
+        try:
+            async with sess.get(
+                "https://gg.deals/news/prime-gaming-free-games/",
+                headers={"User-Agent": GGDEALS_UA},
+            ) as r:
+                idx = await r.text()
+            m = re.search(
+                r'href="(/subscription-news/prime-gaming-amazon-luna-[^"]*full-list[^"]*)"',
+                idx,
+            )
+            if m:
+                async with sess.get("https://gg.deals" + m.group(1), headers={"User-Agent": GGDEALS_UA}) as r:
+                    if r.status == 200:
+                        html = await r.text()
+        except Exception as e:
+            log.warning("gg.deals fallback fallito: %s", e)
+    if not html:
+        log.warning("Prime Gaming: nessuna lista recuperata da gg.deals")
+        return []
+    titles = _parse_ggdeals_games(html)
+    log.info("Prime Gaming: %d giochi trovati su gg.deals", len(titles))
+    games = []
+    for t in titles[:25]:
+        desc = "Gioco gratuito incluso con l'abbonamento Amazon Prime. Riscattalo dall'app Prime Gaming / Amazon Luna."
+        games.append({
+            "id": f"prime_{normalize_title(t)}",
+            "title": t,
+            "description": desc,
+            "url": "https://gaming.amazon.com/home",
+            "image": "",
+            "platform": "PC (Amazon Prime)",
+            "end_date": "N/A",
+            "source": "Amazon Prime Gaming",
+            "worth": "N/A",
+            "translate": False,
+            "categories": ["pc"],
+            "genres": detect_genres(t, desc),
+        })
+    return games
+
+
 async def fetch_all_games() -> list[dict]:
-    epic, gp, reddit = await asyncio.gather(
+    epic, gp, reddit, prime = await asyncio.gather(
         fetch_epic_free(),
         fetch_gamerpower_all(),
         fetch_reddit_all(),
+        fetch_prime_gaming(),
     )
     seen, unique = set(), []
-    for g in epic + gp + reddit:
+    for g in epic + gp + reddit + prime:
         key = normalize_title(g["title"])
         if key in seen:
             continue
