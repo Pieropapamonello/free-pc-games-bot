@@ -204,11 +204,16 @@ def hashtag(t: str) -> str:
 USE_FIREBASE = bool(FIREBASE_URL and FIREBASE_SECRET)
 
 
+DEFAULT_CONTENT = {"game"}  # default: solo giochi gratis pieni (no DLC, no abbonamenti)
+
+
 class State:
     def __init__(self):
         self.chats: set[int] = set()
         self.sent: set[str] = set()
         self.prefs: dict[int, set[str]] = {}
+        self.genres_prefs: dict[int, set[str]] = {}
+        self.content_prefs: dict[int, set[str]] = {}
         self._load()
 
     def _load(self):
@@ -226,6 +231,7 @@ class State:
                         if isinstance(v, dict) and v.get("categories"):
                             self.prefs[cid] = set(v["categories"])
                 self.genres_prefs = {}
+                self.content_prefs = {}
                 if isinstance(prefs, dict):
                     for k, v in prefs.items():
                         cid = int(k)
@@ -237,6 +243,9 @@ class State:
                         gens = v.get("genres") if isinstance(v, dict) else None
                         if isinstance(gens, list):
                             self.genres_prefs[cid] = set(gens)
+                        cont = v.get("content") if isinstance(v, dict) else None
+                        if isinstance(cont, list):
+                            self.content_prefs[cid] = set(cont)
                 self.sent = set(sent.keys()) if isinstance(sent, dict) else set()
                 log.info("Stato caricato da Firebase: %d chat, %d sent, %d prefs", len(self.chats), len(self.sent), len(self.prefs))
                 return
@@ -331,6 +340,20 @@ class State:
     def get_genres(self, chat_id: int) -> set[str]:
         self.genres_prefs = getattr(self, "genres_prefs", {})
         return self.genres_prefs.get(chat_id) or set()
+
+    def set_content(self, chat_id: int, content: set[str]):
+        self.content_prefs = getattr(self, "content_prefs", {})
+        self.content_prefs[chat_id] = set(content)
+        if USE_FIREBASE:
+            try:
+                firebase_put(f"prefs/{chat_id}/content", list(content))
+                return
+            except Exception as e:
+                log.warning("Firebase content save fallita: %s", e)
+
+    def get_content(self, chat_id: int) -> set[str]:
+        self.content_prefs = getattr(self, "content_prefs", {})
+        return self.content_prefs.get(chat_id) or set(DEFAULT_CONTENT)
 
     def acquire_broadcast_lock(self, ttl: int = 180) -> bool:
         """Evita che due istanze concorrenti (es. overlap deploy su Render)
@@ -467,17 +490,20 @@ def _categorize(platforms_str: str) -> list[str]:
     return cats or ["pc"]
 
 
-async def _fetch_gamerpower_one(platform: str) -> list[dict]:
+async def _fetch_gamerpower_one(platform: str, gtype: str = "game") -> list[dict]:
+    if platform:
+        api_url = f"https://www.gamerpower.com/api/giveaways?platform={platform}&type={gtype}"
+    else:
+        api_url = f"https://www.gamerpower.com/api/giveaways?type={gtype}"
     try:
-        data = await fetch_json(
-            f"https://www.gamerpower.com/api/giveaways?platform={platform}&type=game"
-        )
+        data = await fetch_json(api_url)
     except Exception as e:
-        log.warning("GamerPower fetch %s fallita: %s", platform, e)
+        log.warning("GamerPower fetch %s/%s fallita: %s", platform, gtype, e)
         return []
     if not isinstance(data, list):
-        log.info("GamerPower %s: nessun giveaway (%s)", platform, str(data)[:120])
+        log.info("GamerPower %s/%s: nessun giveaway (%s)", platform, gtype, str(data)[:80])
         return []
+    content_type = "dlc" if gtype == "loot" else "game"
     games = []
     for it in data:
         if not isinstance(it, dict):
@@ -489,10 +515,15 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
             continue
         platforms_str = it.get("platforms", "PC") or "PC"
         is_prime = "amazon" in platforms_str.lower() or "prime" in platforms_str.lower()
-        source = "Amazon Prime Gaming" if is_prime else "GamerPower"
+        if content_type == "dlc":
+            source = "DLC / Contenuti"
+        elif is_prime:
+            source = "Amazon Prime Gaming"
+        else:
+            source = "GamerPower"
         gp_desc = (it.get("description") or "").strip()
         games.append({
-            "id": f"gp_{normalize_title(title)}",
+            "id": f"gp_{content_type}_{normalize_title(title)}",
             "title": title,
             "description": gp_desc,
             "url": it.get("open_giveaway_url") or it.get("gamerpower_url") or "",
@@ -504,13 +535,14 @@ async def _fetch_gamerpower_one(platform: str) -> list[dict]:
             "translate": True,
             "categories": _categorize(platforms_str),
             "genres": detect_genres(title, gp_desc),
+            "content_type": content_type,
         })
     return games
 
 
 async def fetch_gamerpower_all() -> list[dict]:
     platforms = GAMERPOWER_PC_PLATFORMS + GAMERPOWER_CONSOLE_PLATFORMS + GAMERPOWER_MOBILE_PLATFORMS
-    results = await asyncio.gather(*[_fetch_gamerpower_one(p) for p in platforms])
+    results = await asyncio.gather(*[_fetch_gamerpower_one(p, "game") for p in platforms])
     out, seen = [], set()
     for batch in results:
         for g in batch:
@@ -519,6 +551,19 @@ async def fetch_gamerpower_all() -> list[dict]:
                 continue
             seen.add(key)
             out.append(g)
+    return out
+
+
+async def fetch_gamerpower_loot() -> list[dict]:
+    """DLC, loot, contenuti in-game gratuiti (PC + console). content_type=dlc."""
+    batch = await _fetch_gamerpower_one("", "loot")
+    out, seen = [], set()
+    for g in batch:
+        key = g["id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(g)
     return out
 
 
@@ -793,15 +838,17 @@ async def fetch_prime_gaming() -> list[dict]:
 
 
 async def fetch_all_games() -> list[dict]:
-    epic, gp, reddit, prime = await asyncio.gather(
+    epic, gp, reddit, prime, loot = await asyncio.gather(
         fetch_epic_free(),
         fetch_gamerpower_all(),
         fetch_reddit_all(),
         fetch_prime_gaming(),
+        fetch_gamerpower_loot(),
     )
     seen, unique = set(), []
-    for g in epic + gp + reddit + prime:
-        key = normalize_title(g["title"])
+    for g in epic + gp + reddit + prime + loot:
+        # la chiave include il tipo: un gioco e un suo DLC non si annullano a vicenda
+        key = (g.get("content_type", "game"), normalize_title(g["title"]))
         if key in seen:
             continue
         seen.add(key)
@@ -831,6 +878,14 @@ def filter_by_genres(games: list[dict], wanted: set[str]) -> list[dict]:
     return out
 
 
+def filter_by_content(games: list[dict], wanted: set[str]) -> list[dict]:
+    """Filtra per tipo di contenuto. Giochi senza 'content_type' sono trattati
+    come 'game'. 'wanted' di default è {'game'} (no DLC, no abbonamenti)."""
+    if not wanted:
+        wanted = set(DEFAULT_CONTENT)
+    return [g for g in games if g.get("content_type", "game") in wanted]
+
+
 def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -844,8 +899,14 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
         desc = desc[:377] + "..."
     source = g.get("source", "?")
     cats = set(g.get("categories") or ["pc"])
+    ctype = g.get("content_type", "game")
     is_prime = "prime" in source.lower() or "amazon" in source.lower()
-    if is_prime:
+    plat_label = "PC" if "pc" in cats else ("CONSOLE" if "console" in cats else "ANDROID")
+    if ctype == "dlc":
+        header = f"🎁 DLC / CONTENUTO GRATIS ({plat_label})"
+    elif ctype == "subscription":
+        header = f"💳 GRATIS CON ABBONAMENTO ({plat_label})"
+    elif is_prime:
         header = "🎁 GRATIS SU PRIME GAMING"
     elif cats == {"console"}:
         header = "🎁 GRATIS SU CONSOLE"
@@ -1133,6 +1194,24 @@ def genres_keyboard(current: set[str]) -> dict:
     return {"inline_keyboard": rows}
 
 
+CONTENT_LABELS = {
+    "game": "🎮 Giochi gratis",
+    "dlc": "🎁 DLC e contenuti",
+    "subscription": "💳 Abbonamenti (PS+/Game Pass)",
+}
+# tipi mostrati nel menu /contenuti (subscription nascosto finché non c'è fonte affidabile)
+CONTENT_MENU = ["game", "dlc"]
+
+
+def content_keyboard(current: set[str]) -> dict:
+    def btn(code: str) -> dict:
+        mark = "✅ " if code in current else ""
+        return {"text": f"{mark}{CONTENT_LABELS[code]}", "callback_data": f"cont:{code}"}
+    rows = [[btn(c)] for c in CONTENT_MENU]
+    rows.append([{"text": "✔️ Conferma", "callback_data": "cont:done"}])
+    return {"inline_keyboard": rows}
+
+
 def handle_update(update: dict) -> Optional[dict]:
     cb = update.get("callback_query")
     if cb:
@@ -1185,6 +1264,26 @@ def handle_update(update: dict) -> Optional[dict]:
             state.set_genres(chat_id, current)
             asyncio.create_task(_update_genres_keyboard(chat_id, msg_id, current, cb_id))
             return None
+        if data.startswith("cont:"):
+            code = data.split(":", 1)[1]
+            current = state.get_content(chat_id) or set(DEFAULT_CONTENT)
+            if code == "done":
+                if not current:
+                    current = set(DEFAULT_CONTENT)
+                state.set_content(chat_id, current)
+                chosen = ", ".join(CONTENT_LABELS[c].split(" ", 1)[-1] for c in ["game", "dlc", "subscription"] if c in current) or "Nessuno"
+                asyncio.create_task(_finish_content(chat_id, msg_id, chosen, cb_id))
+                return None
+            elif code in CONTENT_LABELS:
+                if code in current:
+                    current.discard(code)
+                else:
+                    current.add(code)
+            else:
+                return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+            state.set_content(chat_id, current)
+            asyncio.create_task(_update_content_keyboard(chat_id, msg_id, current, cb_id))
+            return None
         return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
     msg = update.get("message") or update.get("edited_message") or update.get("channel_post")
     if msg:
@@ -1227,6 +1326,21 @@ def handle_update(update: dict) -> Optional[dict]:
                 ),
                 "parse_mode": "HTML",
                 "reply_markup": genres_keyboard(current),
+            }
+        if cmd == "/contenuti":
+            current = state.get_content(chat_id)
+            return {
+                "method": "sendMessage",
+                "chat_id": chat_id,
+                "text": (
+                    "🗂️ <b>Tipi di contenuto</b>\n\n"
+                    "Scegli cosa vuoi ricevere. Di default solo i <b>giochi gratis</b> completi.\n\n"
+                    "• 🎮 <b>Giochi gratis</b> – giochi interi gratuiti\n"
+                    "• 🎁 <b>DLC e contenuti</b> – espansioni, skin, pacchetti, codici (PC e console)\n\n"
+                    "Attiva solo ciò che ti interessa per evitare notifiche di troppo."
+                ),
+                "parse_mode": "HTML",
+                "reply_markup": content_keyboard(current),
             }
         if cmd == "/stop":
             ok = state.unsubscribe(chat_id)
@@ -1280,10 +1394,11 @@ def handle_update(update: dict) -> Optional[dict]:
 async def _handle_giochi(chat_id: int):
     try:
         games = await fetch_all_games()
+        games = filter_by_content(games, state.get_content(chat_id))
         games = filter_by_categories(games, state.get_prefs(chat_id))
         games = filter_by_genres(games, state.get_genres(chat_id))
         if not games:
-            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratuito trovato per i tuoi filtri. Cambia con /piattaforme o /generi.")
+            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco trovato per i tuoi filtri. Cambia con /piattaforme, /generi o /contenuti.")
             return
         for g in games[:12]:
             try:
@@ -1368,6 +1483,39 @@ async def _finish_genres(chat_id: int, msg_id: int, chosen: str, cb_id: str):
         pass
 
 
+async def _update_content_keyboard(chat_id: int, msg_id: int, current: set[str], cb_id: str):
+    try:
+        await tg_api(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=msg_id,
+            reply_markup=content_keyboard(current),
+        )
+    except Exception as e:
+        log.warning("editMessageReplyMarkup cont fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id)
+    except Exception:
+        pass
+
+
+async def _finish_content(chat_id: int, msg_id: int, chosen: str, cb_id: str):
+    try:
+        await tg_api(
+            "editMessageText",
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=f"✅ <b>Contenuti salvati</b>\n\nRiceverai: <b>{html_escape(chosen)}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.warning("editMessageText cont fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Contenuti salvati ✓")
+    except Exception:
+        pass
+
+
 async def broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
@@ -1392,7 +1540,8 @@ async def broadcast_new_games(seed_only: bool = False):
         dead = []
         for chat_id in list(state.chats):
             prefs = state.get_prefs(chat_id)
-            chat_games = filter_by_categories(new, prefs)
+            chat_games = filter_by_content(new, state.get_content(chat_id))
+            chat_games = filter_by_categories(chat_games, prefs)
             chat_games = filter_by_genres(chat_games, state.get_genres(chat_id))
             if not chat_games:
                 continue
@@ -1478,9 +1627,25 @@ async def setup_webhook(app: web.Application):
         log.error("setWebhook fallita: %s", e)
 
 
+async def setup_commands():
+    try:
+        await tg_api("setMyCommands", commands=[
+            {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
+            {"command": "piattaforme", "description": "Scegli PC / Console / Android"},
+            {"command": "contenuti", "description": "Giochi, DLC, Abbonamenti"},
+            {"command": "generi", "description": "Filtra per genere"},
+            {"command": "status", "description": "Stato iscrizione e filtri"},
+            {"command": "stop", "description": "Disiscrivi questa chat"},
+            {"command": "start", "description": "Iscrivi e configura"},
+        ])
+    except Exception as e:
+        log.warning("setMyCommands fallita: %s", e)
+
+
 async def on_startup(app: web.Application):
     app["broadcaster"] = asyncio.create_task(periodic_broadcaster())
     asyncio.create_task(setup_webhook(app))
+    asyncio.create_task(setup_commands())
     log.info("Bot avviato. Chat iscritte: %d", len(state.chats))
 
 
