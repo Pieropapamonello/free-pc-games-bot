@@ -1203,13 +1203,19 @@ async def _finish_genres(chat_id: int, msg_id: int, chosen: str, cb_id: str):
         pass
 
 
-async def broadcast_new_games():
+async def broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
         games = await fetch_all_games()
         new = [g for g in games if g["id"] not in state.sent]
         if not new:
             log.info("Nessun nuovo gioco.")
+            return
+        if seed_only:
+            # Primo avvio con lista 'sent' vuota: marca i giochi già disponibili
+            # come 'visti' SENZA inviarli, per non spammare le chat ad ogni deploy.
+            state.mark_sent([g["id"] for g in new])
+            log.info("Seed iniziale: marcati %d giochi come già visti (nessun invio)", len(new))
             return
         log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
@@ -1238,8 +1244,14 @@ async def broadcast_new_games():
 
 async def periodic_broadcaster():
     await asyncio.sleep(15)
+    # Al primo giro dopo l'avvio: se 'sent' è vuoto (es. perso al deploy o errore
+    # Firebase), facciamo un seed silenzioso invece di rimandare tutti i giochi.
+    first_run_seed = len(state.sent) == 0
+    if first_run_seed:
+        log.info("Avvio con lista 'sent' vuota: primo giro sarà seed silenzioso (no spam)")
     while True:
-        await broadcast_new_games()
+        await broadcast_new_games(seed_only=first_run_seed)
+        first_run_seed = False
         await asyncio.sleep(POLL_MINUTES * 60)
 
 
