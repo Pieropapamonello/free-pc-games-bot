@@ -162,16 +162,20 @@ def translate_it(text: str) -> str:
 def format_price_eur(worth) -> Optional[str]:
     if not worth or worth in ("N/A", "", None):
         return None
-    m = re.search(r"[\d.,]+", str(worth))
+    s = str(worth).strip()
+    # già in euro (es. da Steam con cc=IT: "19,99€") -> restituisco com'è
+    if "€" in s or "eur" in s.lower():
+        return s.replace("EUR", "€").strip()
+    m = re.search(r"[\d.,]+", s)
     if not m:
-        return str(worth)
+        return s
     try:
         n = float(m.group(0).replace(",", ""))
         if n <= 0:
             return None
         return f"€{n * USD_TO_EUR:.2f}"
     except Exception:
-        return str(worth)
+        return s
 
 
 def format_date_it(s) -> Optional[str]:
@@ -328,7 +332,32 @@ class State:
         self.genres_prefs = getattr(self, "genres_prefs", {})
         return self.genres_prefs.get(chat_id) or set()
 
+    def acquire_broadcast_lock(self, ttl: int = 180) -> bool:
+        """Evita che due istanze concorrenti (es. overlap deploy su Render)
+        inviino lo stesso broadcast. Best-effort tramite Firebase."""
+        if not USE_FIREBASE:
+            return True
+        import time
+        my_ts = time.time()
+        try:
+            lock = firebase_get("broadcast_lock")
+            if isinstance(lock, dict) and (my_ts - float(lock.get("ts", 0))) < ttl:
+                log.info("Broadcast lock attivo da altra istanza, salto.")
+                return False
+            firebase_put("broadcast_lock", {"ts": my_ts, "owner": INSTANCE_ID})
+            # rileggi per verificare di aver vinto la corsa
+            time.sleep(0.5)
+            check = firebase_get("broadcast_lock")
+            if isinstance(check, dict) and check.get("owner") != INSTANCE_ID:
+                log.info("Broadcast lock vinto da altra istanza, salto.")
+                return False
+            return True
+        except Exception as e:
+            log.warning("Lock check fallito (procedo): %s", e)
+            return True
 
+
+INSTANCE_ID = secrets.token_hex(4)
 state = State()
 _session: Optional[aiohttp.ClientSession] = None
 
@@ -745,6 +774,7 @@ async def fetch_prime_gaming() -> list[dict]:
             info = None
         desc = (info or {}).get("description") or generic
         image = (info or {}).get("image") or ""
+        price = (info or {}).get("price") or "N/A"
         games.append({
             "id": f"prime_{normalize_title(t)}",
             "title": t,
@@ -754,7 +784,7 @@ async def fetch_prime_gaming() -> list[dict]:
             "platform": "PC (Amazon Prime)",
             "end_date": "N/A",
             "source": "Amazon Prime Gaming",
-            "worth": "N/A",
+            "worth": price,
             "translate": True,
             "categories": ["pc"],
             "genres": detect_genres(t, desc),
@@ -844,6 +874,8 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
     date = format_date_it(g.get("end_date"))
     if date:
         parts.append(html_escape(f"Scade il {date}"))
+    elif is_prime:
+        parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
     return "\n".join(parts)
 
 
@@ -883,6 +915,12 @@ async def steam_lookup(title: str) -> Optional[dict]:
                 det = (ad.get(str(appid)) or {}).get("data") or {}
                 desc = (det.get("short_description") or "").strip()
                 image = det.get("header_image") or ""
+                price = ""
+                po = det.get("price_overview") or {}
+                if po.get("final_formatted"):
+                    price = po["final_formatted"]
+                elif det.get("is_free"):
+                    price = ""
                 trailer = None
                 movies = det.get("movies") or []
                 if movies:
@@ -893,7 +931,7 @@ async def steam_lookup(title: str) -> Optional[dict]:
                         trailer = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
                     if trailer and trailer.startswith("//"):
                         trailer = "https:" + trailer
-                result = {"appid": appid, "description": desc, "image": image, "trailer": trailer}
+                result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price}
     except Exception as e:
         log.info("Steam lookup fallito per '%s': %s", title, e)
         result = None
@@ -1316,6 +1354,12 @@ async def broadcast_new_games(seed_only: bool = False):
             state.mark_sent([g["id"] for g in new])
             log.info("Seed iniziale: marcati %d giochi come già visti (nessun invio)", len(new))
             return
+        # Lock anti-duplicati: se un'altra istanza sta già inviando, salta.
+        if not state.acquire_broadcast_lock():
+            return
+        # Marca SUBITO come inviati (prima dell'invio): se un'altra istanza parte
+        # adesso, vedrà questi giochi come già visti e non li rimanderà.
+        state.mark_sent([g["id"] for g in new])
         log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
         for chat_id in list(state.chats):
@@ -1336,7 +1380,6 @@ async def broadcast_new_games(seed_only: bool = False):
                     log.warning("Errore invio chat %s: %s", chat_id, e)
         for cid in dead:
             state.unsubscribe(cid)
-        state.mark_sent([g["id"] for g in new])
     except Exception as e:
         log.exception("Errore broadcast: %s", e)
 
