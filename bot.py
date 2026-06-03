@@ -882,9 +882,43 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
 _steam_cache: dict[str, Optional[dict]] = {}
 
 
+def _title_variants(clean: str) -> list[str]:
+    """Genera varianti del titolo da provare su Steam, dalla più specifica alla più generica."""
+    variants = [clean]
+    # togli sottotitolo dopo ':' o ' - '
+    base = re.split(r"\s*[:\-–]\s+", clean)[0].strip()
+    if base and base != clean and len(base) >= 3:
+        variants.append(base)
+    # togli suffissi tipo "Definitive Edition", "Remastered", numeri romani finali
+    stripped = re.sub(r"\s+(definitive edition|remastered|complete edition|goty.*|game of the year.*)$", "", clean, flags=re.IGNORECASE).strip()
+    if stripped and stripped not in variants and len(stripped) >= 3:
+        variants.append(stripped)
+    return variants
+
+
+async def _steam_search_one(sess, term: str, key: str) -> Optional[int]:
+    async with sess.get(
+        f"https://store.steampowered.com/api/storesearch/?term={term}&cc=IT&l=italian",
+        headers={"User-Agent": "Mozilla/5.0"},
+    ) as r:
+        sr = await r.json(content_type=None)
+    for item in (sr.get("items") or [])[:5]:
+        appid = item.get("id")
+        if not appid:
+            continue
+        steam_title = normalize_title(item.get("name", ""))
+        if steam_title == key:
+            return appid
+        wanted = set(key.split())
+        found = set(steam_title.split())
+        if wanted and len(wanted & found) / len(wanted) >= 0.6:
+            return appid
+    return None
+
+
 async def steam_lookup(title: str) -> Optional[dict]:
-    """Cerca il gioco su Steam (match titolo) e restituisce
-    {appid, description, image, trailer} oppure None. Risultato in cache."""
+    """Cerca il gioco su Steam (match titolo, più varianti) e restituisce
+    {appid, description, image, trailer, price} oppure None. Risultato in cache."""
     clean = clean_title(title)
     key = normalize_title(clean)
     if key in _steam_cache:
@@ -892,46 +926,35 @@ async def steam_lookup(title: str) -> Optional[dict]:
     sess = await get_session()
     result = None
     try:
-        async with sess.get(
-            f"https://store.steampowered.com/api/storesearch/?term={clean}&cc=IT&l=italian",
-            headers={"User-Agent": "Mozilla/5.0"},
-        ) as r:
-            sr = await r.json(content_type=None)
-        items = sr.get("items") or []
-        appid = items[0].get("id") if items else None
+        appid = None
+        for variant in _title_variants(clean):
+            appid = await _steam_search_one(sess, variant, normalize_title(variant) if variant != clean else key)
+            if appid:
+                break
         if appid:
-            steam_title = normalize_title(items[0].get("name", ""))
-            ok = steam_title == key
-            if not ok:
-                wanted = set(key.split())
-                found = set(steam_title.split())
-                ok = bool(wanted) and len(wanted & found) / len(wanted) >= 0.6
-            if ok:
-                async with sess.get(
-                    f"https://store.steampowered.com/api/appdetails?appids={appid}&l=italian&cc=IT",
-                    headers={"User-Agent": "Mozilla/5.0"},
-                ) as r:
-                    ad = await r.json(content_type=None)
-                det = (ad.get(str(appid)) or {}).get("data") or {}
-                desc = (det.get("short_description") or "").strip()
-                image = det.get("header_image") or ""
-                price = ""
-                po = det.get("price_overview") or {}
-                if po.get("final_formatted"):
-                    price = po["final_formatted"]
-                elif det.get("is_free"):
-                    price = ""
-                trailer = None
-                movies = det.get("movies") or []
-                if movies:
-                    m = next((x for x in movies if x.get("highlight")), movies[0])
-                    mp4 = m.get("mp4") or {}
-                    trailer = mp4.get("480") or mp4.get("max")
-                    if not trailer and m.get("id"):
-                        trailer = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
-                    if trailer and trailer.startswith("//"):
-                        trailer = "https:" + trailer
-                result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price}
+            async with sess.get(
+                f"https://store.steampowered.com/api/appdetails?appids={appid}&l=italian&cc=IT",
+                headers={"User-Agent": "Mozilla/5.0"},
+            ) as r:
+                ad = await r.json(content_type=None)
+            det = (ad.get(str(appid)) or {}).get("data") or {}
+            desc = (det.get("short_description") or "").strip()
+            image = det.get("header_image") or ""
+            price = ""
+            po = det.get("price_overview") or {}
+            if po.get("final_formatted"):
+                price = po["final_formatted"]
+            trailer = None
+            movies = det.get("movies") or []
+            if movies:
+                m = next((x for x in movies if x.get("highlight")), movies[0])
+                mp4 = m.get("mp4") or {}
+                trailer = mp4.get("480") or mp4.get("max")
+                if not trailer and m.get("id"):
+                    trailer = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
+                if trailer and trailer.startswith("//"):
+                    trailer = "https:" + trailer
+            result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price}
     except Exception as e:
         log.info("Steam lookup fallito per '%s': %s", title, e)
         result = None
@@ -1018,7 +1041,12 @@ def _download_button(g: dict) -> Optional[dict]:
     url = g.get("url")
     if not url:
         return None
-    return {"inline_keyboard": [[{"text": "⬇️ Scarica gioco", "url": url}]]}
+    source = (g.get("source") or "").lower()
+    if "prime" in source or "amazon" in source:
+        label = "🎁 Riscatta su Prime Gaming"
+    else:
+        label = "⬇️ Scarica gioco"
+    return {"inline_keyboard": [[{"text": label, "url": url}]]}
 
 
 async def send_game(chat_id: int, g: dict):
