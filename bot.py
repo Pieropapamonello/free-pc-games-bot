@@ -588,6 +588,52 @@ async def fetch_epic_full_description(slug: str) -> str:
     return ""
 
 
+async def fetch_epic_upcoming() -> list[dict]:
+    """Giochi gratis Epic in arrivo (settimane prossime), da upcomingPromotionalOffers."""
+    url = (
+        "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
+        "?locale=it-IT&country=IT&allowCountries=IT"
+    )
+    try:
+        data = await fetch_json(url)
+    except Exception as e:
+        log.warning("Epic upcoming fetch fallita: %s", e)
+        return []
+    out = []
+    elements = (
+        data.get("data", {})
+        .get("Catalog", {})
+        .get("searchStore", {})
+        .get("elements", [])
+    )
+    for el in elements:
+        up = (el.get("promotions") or {}).get("upcomingPromotionalOffers") or []
+        start_date = None
+        for p in up:
+            for o in p.get("promotionalOffers", []):
+                start_date = o.get("startDate")
+                break
+            if start_date:
+                break
+        if not start_date:
+            continue
+        title = (el.get("title") or "").strip()
+        if not title or "mystery game" in title.lower():
+            title = "🎲 Gioco a sorpresa (Epic non lo ha ancora svelato)"
+        image = ""
+        for img in el.get("keyImages", []):
+            if img.get("type") in ("OfferImageWide", "DieselStoreFrontWide", "Thumbnail"):
+                image = img.get("url", "")
+                break
+        try:
+            dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            when = f"{dt.day} {MESI_IT[dt.month - 1]} {dt.year}"
+        except Exception:
+            when = "prossimamente"
+        out.append({"title": title, "image": image, "when": when})
+    return out
+
+
 async def fetch_epic_free() -> list[dict]:
     url = (
         "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
@@ -1441,6 +1487,13 @@ def handle_update(update: dict) -> Optional[dict]:
                 "chat_id": chat_id,
                 "text": f"🔎 Cerco «{query[1].strip()}» tra i giochi gratis…",
             }
+        if cmd == "/prossimi":
+            asyncio.create_task(_handle_prossimi(chat_id))
+            return {
+                "method": "sendMessage",
+                "chat_id": chat_id,
+                "text": "🔮 Controllo i prossimi giochi gratis Epic…",
+            }
         return None
     cmu = update.get("my_chat_member")
     if cmu:
@@ -1480,6 +1533,24 @@ async def _handle_giochi(chat_id: int):
                 log.warning("send_game fallito: %s", e)
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
+
+
+async def _handle_prossimi(chat_id: int):
+    try:
+        upcoming = await fetch_epic_upcoming()
+        if not upcoming:
+            await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco gratis Epic in arrivo al momento.")
+            return
+        lines = ["🔮 <b>PROSSIMI GIOCHI GRATIS — EPIC GAMES</b>", ""]
+        for g in upcoming:
+            lines.append(f"• <b>{html_escape(g['title'])}</b>")
+            lines.append(f"  dal {html_escape(g['when'])}")
+        lines.append("")
+        lines.append("Te li segnalo appena diventano riscattabili. 🎁")
+        await tg_api("sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        log.exception("Errore /prossimi: %s", e)
+        await tg_api("sendMessage", chat_id=chat_id, text="Errore nel recupero dei prossimi giochi. Riprova più tardi.")
 
 
 async def _handle_cerca(chat_id: int, query: str):
@@ -1731,6 +1802,7 @@ async def setup_commands():
         await tg_api("setMyCommands", commands=[
             {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
             {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
+            {"command": "prossimi", "description": "Giochi gratis Epic in arrivo"},
             {"command": "piattaforme", "description": "Scegli PC / Console / Android"},
             {"command": "contenuti", "description": "Giochi, DLC, Abbonamenti"},
             {"command": "generi", "description": "Filtra per genere"},
