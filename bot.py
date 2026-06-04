@@ -1202,16 +1202,23 @@ async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
     )
 
 
-def _download_button(g: dict) -> Optional[dict]:
+def game_keyboard(g: dict, react_count: int = 0) -> dict:
+    rows = []
     url = g.get("url")
-    if not url:
-        return None
-    source = (g.get("source") or "").lower()
-    if "prime" in source or "amazon" in source:
-        label = "🎁 Riscatta su Prime Gaming"
-    else:
-        label = "⬇️ Scarica gioco"
-    return {"inline_keyboard": [[{"text": label, "url": url}]]}
+    if url:
+        source = (g.get("source") or "").lower()
+        if "prime" in source or "amazon" in source:
+            label = "🎁 Riscatta su Prime Gaming"
+        else:
+            label = "⬇️ Scarica gioco"
+        rows.append([{"text": label, "url": url}])
+    react_label = f"🔥 Lo prendo ({react_count})" if react_count else "🔥 Lo prendo"
+    rows.append([{"text": react_label, "callback_data": "react"}])
+    return {"inline_keyboard": rows}
+
+
+def _download_button(g: dict) -> Optional[dict]:
+    return game_keyboard(g, 0)
 
 
 async def send_game(chat_id: int, g: dict):
@@ -1325,6 +1332,10 @@ def handle_update(update: dict) -> Optional[dict]:
         cb_id = cb.get("id")
         if not chat_id:
             return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+        if data == "react":
+            user = cb.get("from") or {}
+            asyncio.create_task(_handle_reaction(chat_id, msg_id, user, cb_id, cb.get("message") or {}))
+            return None
         if data.startswith("pref:"):
             code = data.split(":", 1)[1]
             current = state.get_prefs(chat_id) or set()
@@ -1494,6 +1505,9 @@ def handle_update(update: dict) -> Optional[dict]:
                 "chat_id": chat_id,
                 "text": "🔮 Controllo i prossimi giochi gratis Epic…",
             }
+        if cmd in ("/classifica", "/top"):
+            asyncio.create_task(_handle_classifica(chat_id))
+            return None
         return None
     cmu = update.get("my_chat_member")
     if cmu:
@@ -1533,6 +1547,104 @@ async def _handle_giochi(chat_id: int):
                 log.warning("send_game fallito: %s", e)
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
+
+
+def _reaction_toggle_sync(chat_id: int, msg_id: int, user: dict) -> int:
+    """Aggiunge/toglie la reazione dell'utente al gioco (per messaggio). Aggiorna
+    il punteggio del cacciatore. Restituisce il nuovo conteggio reazioni del messaggio.
+    Solo Firebase (no-op se non configurato)."""
+    if not USE_FIREBASE:
+        return 0
+    uid = str(user.get("id"))
+    name = user.get("first_name") or user.get("username") or "Utente"
+    rpath = f"reactions/{chat_id}/{msg_id}"
+    try:
+        current = firebase_get(rpath) or {}
+        if not isinstance(current, dict):
+            current = {}
+        already = uid in current
+        if already:
+            firebase_delete(f"{rpath}/{uid}")
+            current.pop(uid, None)
+            delta = -1
+        else:
+            firebase_patch(rpath, {uid: name})
+            current[uid] = name
+            delta = 1
+        # aggiorna punteggio del cacciatore
+        spath = f"scores/{chat_id}/{uid}"
+        sc = firebase_get(spath) or {}
+        if not isinstance(sc, dict):
+            sc = {}
+        pts = int(sc.get("points", 0)) + delta
+        if pts < 0:
+            pts = 0
+        firebase_put(spath, {"name": name, "points": pts})
+        return len(current)
+    except Exception as e:
+        log.warning("reaction toggle fallito: %s", e)
+        return 0
+
+
+async def _handle_reaction(chat_id: int, msg_id: int, user: dict, cb_id: str, message: dict):
+    count = await asyncio.to_thread(_reaction_toggle_sync, chat_id, msg_id, user)
+    # ricostruisco la tastiera col nuovo conteggio mantenendo il bottone download
+    url = None
+    src = ""
+    for row in (message.get("reply_markup") or {}).get("inline_keyboard", []):
+        for b in row:
+            if b.get("url"):
+                url = b["url"]
+                if "prime" in b.get("text", "").lower():
+                    src = "amazon prime gaming"
+    g = {"url": url, "source": src}
+    try:
+        await tg_api(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=msg_id,
+            reply_markup=game_keyboard(g, count),
+        )
+    except Exception as e:
+        log.info("editMessageReplyMarkup react fallita: %s", e)
+    try:
+        await tg_api("answerCallbackQuery", callback_query_id=cb_id, text="Aggiunto! 🔥" if count else "Tolto")
+    except Exception:
+        pass
+
+
+def _classifica_sync(chat_id: int) -> list[tuple]:
+    if not USE_FIREBASE:
+        return []
+    try:
+        scores = firebase_get(f"scores/{chat_id}") or {}
+        if not isinstance(scores, dict):
+            return []
+        rows = [(v.get("name", "Utente"), int(v.get("points", 0))) for v in scores.values() if isinstance(v, dict)]
+        rows = [r for r in rows if r[1] > 0]
+        rows.sort(key=lambda x: x[1], reverse=True)
+        return rows[:10]
+    except Exception as e:
+        log.warning("classifica fallita: %s", e)
+        return []
+
+
+async def _handle_classifica(chat_id: int):
+    rows = await asyncio.to_thread(_classifica_sync, chat_id)
+    if not rows:
+        await tg_api(
+            "sendMessage",
+            chat_id=chat_id,
+            text="🏆 Ancora nessun cacciatore in classifica!\nReagite ai giochi con «🔥 Lo prendo» per guadagnare punti.",
+        )
+        return
+    medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
+    lines = ["🏆 <b>CLASSIFICA CACCIATORI DI GIOCHI</b>", ""]
+    for i, (name, pts) in enumerate(rows):
+        lines.append(f"{medals[i]} {html_escape(name)} — <b>{pts}</b> 🔥")
+    lines.append("")
+    lines.append("Reagisci ai giochi con «🔥 Lo prendo» per scalare la classifica!")
+    await tg_api("sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
 
 
 async def _handle_prossimi(chat_id: int):
@@ -1803,6 +1915,7 @@ async def setup_commands():
             {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
             {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
             {"command": "prossimi", "description": "Giochi gratis Epic in arrivo"},
+            {"command": "classifica", "description": "Top cacciatori di giochi del gruppo"},
             {"command": "piattaforme", "description": "Scegli PC / Console / Android"},
             {"command": "contenuti", "description": "Giochi, DLC, Abbonamenti"},
             {"command": "generi", "description": "Filtra per genere"},
