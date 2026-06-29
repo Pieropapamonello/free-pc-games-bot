@@ -822,6 +822,58 @@ def _parse_ggdeals_games(html: str) -> list[str]:
     return titles
 
 
+_STORE_SUFFIXES = ("gog", "epic", "aga", "amazon-games", "ubisoft", "gamesplanet",
+                   "legacy-games", "microsoft", "ea", "origin")
+
+
+async def fetch_prime_amazon_links() -> dict:
+    """Scrapa il canale pubblico t.me/s/freegamesnot per i link diretti
+    luna.amazon.it/claims/... dei giochi Prime italiani.
+    Restituisce {titolo_normalizzato: url_diretto}."""
+    sess = await get_session()
+    try:
+        async with sess.get(
+            "https://t.me/s/freegamesnot",
+            headers={"User-Agent": GGDEALS_UA},
+        ) as r:
+            html = await r.text()
+    except Exception as e:
+        log.info("t.me/freegamesnot fetch fallita: %s", e)
+        return {}
+    links = re.findall(r'https?://luna\.amazon\.it/claims/([a-z0-9\-]+)/dp/[^\s"<>&]+', html)
+    full = re.findall(r'(https?://luna\.amazon\.it/claims/[a-z0-9\-]+/dp/amzn1\.pg\.item\.[a-z0-9\-]+)', html)
+    out = {}
+    for slug, url in zip(links, full):
+        name = slug
+        for suf in _STORE_SUFFIXES:
+            if name.endswith("-" + suf):
+                name = name[: -(len(suf) + 1)]
+                break
+        key = normalize_title(name.replace("-", " "))
+        if key and key not in out:
+            out[key] = url
+    log.info("Prime: %d link diretti amazon.it da t.me/freegamesnot", len(out))
+    return out
+
+
+def _match_amazon_link(title: str, link_map: dict) -> Optional[str]:
+    key = normalize_title(title)
+    if key in link_map:
+        return link_map[key]
+    kw = set(key.split())
+    if not kw:
+        return None
+    for lk, url in link_map.items():
+        lkw = set(lk.split())
+        if not lkw:
+            continue
+        # match se i due insiemi di parole coincidono molto
+        inter = kw & lkw
+        if len(inter) / max(len(kw), len(lkw)) >= 0.6:
+            return url
+    return None
+
+
 async def fetch_prime_gaming() -> list[dict]:
     sess = await get_session()
     now = datetime.now(timezone.utc)
@@ -858,6 +910,7 @@ async def fetch_prime_gaming() -> list[dict]:
         return []
     titles = _parse_ggdeals_games(html)[:25]
     log.info("Prime Gaming: %d giochi trovati su gg.deals", len(titles))
+    link_map = await fetch_prime_amazon_links()
     steam_infos = await asyncio.gather(*[steam_lookup(t) for t in titles], return_exceptions=True)
     # per i titoli dove Steam non ha dato descrizione, prova RAWG (se configurato)
     need_rawg = [
@@ -878,11 +931,12 @@ async def fetch_prime_gaming() -> list[dict]:
         desc = (info or {}).get("description") or rawg.get("description") or generic
         image = (info or {}).get("image") or rawg.get("image") or ""
         price = (info or {}).get("price") or "N/A"
+        direct = _match_amazon_link(t, link_map)
         games.append({
             "id": f"prime_{normalize_title(t)}",
             "title": t,
             "description": desc,
-            "url": "https://gaming.amazon.com/home",
+            "url": direct or "https://gaming.amazon.com/home",
             "image": image,
             "platform": "PC (Amazon Prime)",
             "end_date": "N/A",
@@ -992,12 +1046,12 @@ def format_game(g: dict) -> str:
         parts.append(html_escape(f"Scade il {date}"))
     elif is_prime:
         parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
-    # link del gioco in chiaro (copiabile + cliccabile)
+    # link del gioco: URL in chiaro -> Telegram lo rende cliccabile (e copiabile)
     url = g.get("url")
     if url:
         label = "🎮 Riscatta qui:" if is_prime else "🔗 Scarica qui:"
         parts.append("")
-        parts.append(f"{label}\n<code>{html_escape(url)}</code>")
+        parts.append(f"{label} {html_escape(url)}")
     return "\n".join(parts)
 
 
