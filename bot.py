@@ -948,7 +948,7 @@ def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
+def format_game(g: dict) -> str:
     title = clean_title(g["title"])
     desc = g.get("description", "") or ""
     if g.get("translate", True):
@@ -979,9 +979,6 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
     if desc:
         parts.append("")
         parts.append(html_escape(desc))
-    if trailer_url:
-        parts.append("")
-        parts.append(f"🎬 Trailer: {html_escape(trailer_url)}")
     parts.append("")
     plat_tag = "#PC" if "pc" in cats else ("#Console" if "console" in cats else "#Android")
     tags = [plat_tag, hashtag(source)]
@@ -995,6 +992,12 @@ def format_game(g: dict, trailer_url: Optional[str] = None) -> str:
         parts.append(html_escape(f"Scade il {date}"))
     elif is_prime:
         parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
+    # link del gioco in chiaro (copiabile + cliccabile)
+    url = g.get("url")
+    if url:
+        label = "🎮 Riscatta qui:" if is_prime else "🔗 Scarica qui:"
+        parts.append("")
+        parts.append(f"{label}\n<code>{html_escape(url)}</code>")
     return "\n".join(parts)
 
 
@@ -1202,24 +1205,18 @@ async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
     )
 
 
-def _download_button(g: dict) -> Optional[dict]:
-    url = g.get("url")
-    if not url:
+def _trailer_button(yt_url: Optional[str]) -> Optional[dict]:
+    if not yt_url:
         return None
-    source = (g.get("source") or "").lower()
-    if "prime" in source or "amazon" in source:
-        label = "🎁 Riscatta su Prime Gaming"
-    else:
-        label = "⬇️ Scarica gioco"
-    return {"inline_keyboard": [[{"text": label, "url": url}]]}
+    return {"inline_keyboard": [[{"text": "▶️ Guarda trailer", "url": yt_url}]]}
 
 
 async def send_game(chat_id: int, g: dict):
     yt = await search_youtube_video(clean_title(g["title"]))
     yt_url = yt[0] if yt else None
     yt_thumb = yt[1] if yt else None
-    caption = format_game(g, trailer_url=yt_url)
-    button = _download_button(g)
+    caption = format_game(g)
+    button = _trailer_button(yt_url)
     mp4 = None
     if yt_url:
         mp4 = await extract_youtube_mp4(yt_url)
