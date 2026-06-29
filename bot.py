@@ -806,30 +806,22 @@ MONTHS_EN = ["january", "february", "march", "april", "may", "june",
 GGDEALS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
-def _parse_ggdeals_games(html: str) -> list[str]:
-    links = re.findall(r'<a[^>]+href="(/game/[^"]+)"[^>]*>(.*?)</a>', html, re.S)
-    titles, seen = [], set()
-    for _href, txt in links:
-        t = re.sub(r"<[^>]+>", "", txt).strip()
-        t = t.replace("&amp;", "&").replace("&#039;", "'").replace("&quot;", '"')
-        if not t or "Discount" in t or "Cheapest price" in t:
-            continue
-        key = normalize_title(t)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        titles.append(t)
-    return titles
-
-
 _STORE_SUFFIXES = ("gog", "epic", "aga", "amazon-games", "ubisoft", "gamesplanet",
-                   "legacy-games", "microsoft", "ea", "origin")
+                   "legacy-games", "microsoft", "ea", "origin", "steam")
 
 
-async def fetch_prime_amazon_links() -> dict:
-    """Scrapa il canale pubblico t.me/s/freegamesnot per i link diretti
-    luna.amazon.it/claims/... dei giochi Prime italiani.
-    Restituisce {titolo_normalizzato: url_diretto}."""
+def _title_from_slug(slug: str) -> str:
+    name = slug
+    for suf in _STORE_SUFFIXES:
+        if name.endswith("-" + suf):
+            name = name[: -(len(suf) + 1)]
+            break
+    return name.replace("-", " ").strip()
+
+
+async def fetch_prime_gaming() -> list[dict]:
+    """Giochi Prime Gaming presi direttamente dal canale t.me/freegamesnot
+    (titoli + link diretti luna.amazon.it). Arricchiti con Steam/RAWG."""
     sess = await get_session()
     try:
         async with sess.get(
@@ -838,81 +830,27 @@ async def fetch_prime_amazon_links() -> dict:
         ) as r:
             html = await r.text()
     except Exception as e:
-        log.info("t.me/freegamesnot fetch fallita: %s", e)
-        return {}
-    links = re.findall(r'https?://luna\.amazon\.it/claims/([a-z0-9\-]+)/dp/[^\s"<>&]+', html)
-    full = re.findall(r'(https?://luna\.amazon\.it/claims/[a-z0-9\-]+/dp/amzn1\.pg\.item\.[a-z0-9\-]+)', html)
-    out = {}
-    for slug, url in zip(links, full):
-        name = slug
-        for suf in _STORE_SUFFIXES:
-            if name.endswith("-" + suf):
-                name = name[: -(len(suf) + 1)]
-                break
-        key = normalize_title(name.replace("-", " "))
-        if key and key not in out:
-            out[key] = url
-    log.info("Prime: %d link diretti amazon.it da t.me/freegamesnot", len(out))
-    return out
-
-
-def _match_amazon_link(title: str, link_map: dict) -> Optional[str]:
-    key = normalize_title(title)
-    if key in link_map:
-        return link_map[key]
-    kw = set(key.split())
-    if not kw:
-        return None
-    for lk, url in link_map.items():
-        lkw = set(lk.split())
-        if not lkw:
-            continue
-        # match se i due insiemi di parole coincidono molto
-        inter = kw & lkw
-        if len(inter) / max(len(kw), len(lkw)) >= 0.6:
-            return url
-    return None
-
-
-async def fetch_prime_gaming() -> list[dict]:
-    sess = await get_session()
-    now = datetime.now(timezone.utc)
-    html = None
-    direct = (
-        f"https://gg.deals/subscription-news/prime-gaming-amazon-luna-"
-        f"{MONTHS_EN[now.month - 1]}-{now.year}-full-list-of-free-games-for-the-month/"
-    )
-    try:
-        async with sess.get(direct, headers={"User-Agent": GGDEALS_UA}) as r:
-            if r.status == 200:
-                html = await r.text()
-    except Exception as e:
-        log.info("gg.deals URL diretto fallito: %s", e)
-    if not html:
-        try:
-            async with sess.get(
-                "https://gg.deals/news/prime-gaming-free-games/",
-                headers={"User-Agent": GGDEALS_UA},
-            ) as r:
-                idx = await r.text()
-            m = re.search(
-                r'href="(/subscription-news/prime-gaming-amazon-luna-[^"]*full-list[^"]*)"',
-                idx,
-            )
-            if m:
-                async with sess.get("https://gg.deals" + m.group(1), headers={"User-Agent": GGDEALS_UA}) as r:
-                    if r.status == 200:
-                        html = await r.text()
-        except Exception as e:
-            log.warning("gg.deals fallback fallito: %s", e)
-    if not html:
-        log.warning("Prime Gaming: nessuna lista recuperata da gg.deals")
+        log.warning("t.me/freegamesnot fetch fallita: %s", e)
         return []
-    titles = _parse_ggdeals_games(html)[:25]
-    log.info("Prime Gaming: %d giochi trovati su gg.deals", len(titles))
-    link_map = await fetch_prime_amazon_links()
+    # coppie (slug, url completo) dai link luna.amazon.it nei post
+    pairs = re.findall(
+        r'https?://luna\.amazon\.it/claims/([a-z0-9\-]+)/dp/(amzn1\.pg\.item\.[a-z0-9\-]+)',
+        html,
+    )
+    items, seen = [], set()
+    for slug, item_id in pairs:
+        title = _title_from_slug(slug)
+        key = normalize_title(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        url = f"https://luna.amazon.it/claims/{slug}/dp/{item_id}?tag=&ingress=twch"
+        items.append((title, url))
+    log.info("Prime Gaming: %d giochi dal canale t.me/freegamesnot", len(items))
+    if not items:
+        return []
+    titles = [t for t, _ in items]
     steam_infos = await asyncio.gather(*[steam_lookup(t) for t in titles], return_exceptions=True)
-    # per i titoli dove Steam non ha dato descrizione, prova RAWG (se configurato)
     need_rawg = [
         t for t, info in zip(titles, steam_infos)
         if not (isinstance(info, dict) and info.get("description"))
@@ -924,19 +862,18 @@ async def fetch_prime_gaming() -> list[dict]:
             rawg_results[t] = info if isinstance(info, dict) else None
     generic = "Gioco gratuito incluso con l'abbonamento Amazon Prime. Riscattalo dall'app Prime Gaming / Amazon Luna."
     games = []
-    for t, info in zip(titles, steam_infos):
+    for (t, url), info in zip(items, steam_infos):
         if isinstance(info, Exception):
             info = None
         rawg = rawg_results.get(t) or {}
         desc = (info or {}).get("description") or rawg.get("description") or generic
         image = (info or {}).get("image") or rawg.get("image") or ""
         price = (info or {}).get("price") or "N/A"
-        direct = _match_amazon_link(t, link_map)
         games.append({
             "id": f"prime_{normalize_title(t)}",
             "title": t,
             "description": desc,
-            "url": direct or "https://gaming.amazon.com/home",
+            "url": url,
             "image": image,
             "platform": "PC (Amazon Prime)",
             "end_date": "N/A",
@@ -998,6 +935,9 @@ def filter_by_content(games: list[dict], wanted: set[str]) -> list[dict]:
     return [g for g in games if g.get("content_type", "game") in wanted]
 
 
+PRIME_AFFILIATE = "https://amzn.to/4eESlSY"
+
+
 def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -1046,12 +986,18 @@ def format_game(g: dict) -> str:
         parts.append(html_escape(f"Scade il {date}"))
     elif is_prime:
         parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
+    if is_prime:
+        parts.append("")
+        parts.append("⚠️ <b>Richiede un abbonamento Amazon Prime attivo.</b>")
     # link del gioco: URL in chiaro -> Telegram lo rende cliccabile (e copiabile)
     url = g.get("url")
     if url:
         label = "🎮 Riscatta qui:" if is_prime else "🔗 Scarica qui:"
         parts.append("")
         parts.append(f"{label} {html_escape(url)}")
+    if is_prime:
+        parts.append("")
+        parts.append(f"🛒 Non hai Prime? Attivalo qui: {PRIME_AFFILIATE}")
     return "\n".join(parts)
 
 
