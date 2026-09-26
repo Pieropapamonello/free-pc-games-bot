@@ -1408,6 +1408,10 @@ def handle_update(update: dict) -> Optional[dict]:
         if cmd == "/start" or cmd == "/piattaforme":
             added = state.subscribe(chat_id)
             current = state.get_prefs(chat_id)
+            if cmd == "/start":
+                # Richiesta personale: non avviare il broadcast e non modificare
+                # lo storico globale usato dalle notifiche periodiche.
+                asyncio.create_task(_handle_giochi(chat_id))
             return {
                 "method": "sendMessage",
                 "chat_id": chat_id,
