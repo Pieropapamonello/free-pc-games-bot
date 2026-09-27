@@ -79,16 +79,16 @@ class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CardTests(unittest.TestCase):
-    def test_compact_card_has_three_description_lines_and_no_hashtags(self):
+    def test_compact_card_has_short_description_icons_and_no_hashtags(self):
         with patch.object(bot, "translate_it", return_value="Un gioco di avventura e azione. " * 20):
             description = bot.compact_description("text")
             card = bot.format_game({"title": "Example", "description": "text",
                                     "source": "Steam", "url": "https://store.steampowered.com/"})
-        self.assertLessEqual(len(description.splitlines()), 3)
-        self.assertTrue(all(len(line) <= 42 for line in description.splitlines()))
-        self.assertIn("Piattaforma: PC", card)
-        self.assertIn("Descrizione: ", card)
-        self.assertIn('Scarica da: <a href=', card)
+        self.assertLessEqual(len(description), 150)
+        self.assertNotIn("\n", description)
+        self.assertIn("🖥 PC", card)
+        self.assertIn("📝 <i>", card)
+        self.assertIn('Scarica da:</b> <a href=', card)
         self.assertNotIn("#", card)
         self.assertNotIn("Valore", card)
 

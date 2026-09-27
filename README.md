@@ -17,8 +17,9 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 ## Descrizioni e video
 
 Le descrizioni di tutte le fonti passano dalla traduzione in italiano, anche
-quando la fonte dichiara di essere localizzata. Dopo due tentativi falliti viene
-mostrato un avviso in italiano, senza pubblicare il testo originale inglese.
+quando la fonte dichiara di essere localizzata. Dopo due tentativi falliti la
+scheda usa una breve alternativa italiana basata sui metadati disponibili,
+senza pubblicare il testo originale inglese.
 Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
 
 Per ogni gioco il bot prova prima il video Steam e poi YouTube, anche se Telegram
@@ -27,8 +28,11 @@ al trailer quando disponibile, senza foto. Non è garantita la disponibilità di
 un video per ogni gioco. Le descrizioni lunghe vengono inviate separatamente dal
 video per rispettare il limite della didascalia.
 
-La scheda mostra titolo, piattaforma, descrizione italiana (massimo tre righe
-logiche da 42 caratteri), scadenza se nota e link testuale "Scarica da".
+La scheda mostra titolo in grassetto, icone per piattaforma e disponibilità,
+descrizione italiana in corsivo (massimo 150 caratteri), scadenza se nota e link
+testuale "Scarica da", con spaziatura tra intestazione, descrizione e link.
+Se la traduzione fallisce, la scheda usa i generi noti e un breve rimando ai
+dettagli del gioco: non mostra messaggi tecnici sulla traduzione.
 Telegram può andare ulteriormente a capo in base allo schermo e alla dimensione
 del font. Sono rimossi hashtag, prezzo originale e pulsanti del trailer.
 Quando il video non è inviabile viene inserito un link nel testo; se non è stato

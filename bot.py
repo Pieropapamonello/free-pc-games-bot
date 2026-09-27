@@ -1085,8 +1085,10 @@ def html_escape(text: str) -> str:
 def compact_description(text: str) -> str:
     plain = unescape(re.sub(r"<[^>]+>", " ", text or ""))
     translated = translate_it(" ".join(plain.split()))
-    # Tre righe logiche brevi. Telegram decide il wrapping sul dispositivo.
-    return "\n".join(textwrap.wrap(translated, width=42, max_lines=3, placeholder="…"))
+    if translated == TRANSLATION_UNAVAILABLE:
+        return ""
+    # Paragrafo breve senza interruzioni artificiali nel mezzo delle frasi.
+    return textwrap.shorten(translated, width=150, placeholder="…")
 
 
 def text_link(url: str, label: str) -> str:
@@ -1102,25 +1104,35 @@ def format_game(g: dict) -> str:
                                       ("android", "Android / iOS")) if cat in cats]
     if "browser" in (g.get("platform") or "").lower():
         labels.append("Browser")
-    parts = [f"<b>{html_escape(title)}</b>",
-             "Piattaforma: " + " / ".join(labels),
-             "Descrizione: " + html_escape(compact_description(g.get("description", "")) or
-                                          "Consulta i dettagli nella pagina del gioco.")]
     source = g.get("source") or "Pagina del gioco"
+    platform_icon = "🖥" if "pc" in cats else ("🎮" if "console" in cats else "📱")
+    availability = "🎁 Gratis"
     if g.get("access_model") == "free_to_play":
-        parts.append("Tipo: free-to-play")
+        availability = "🆓 Free-to-play"
     elif g.get("content_type") == "dlc":
-        parts.append("Tipo: DLC / contenuti aggiuntivi")
-    if g.get("content_type") == "subscription" or any(x in source.lower() for x in ("prime", "amazon")):
-        parts.append("Richiede un abbonamento attivo" + (" Amazon Prime" if "prime" in source.lower() or "amazon" in source.lower() else ""))
+        availability = "🎁 DLC / contenuti"
+    subscription = g.get("content_type") == "subscription" or any(x in source.lower() for x in ("prime", "amazon"))
+    if subscription:
+        availability = "💳 Con abbonamento"
+    description = compact_description(g.get("description", ""))
+    if not description:
+        genres = [GENRE_LABELS[genre].split(" ", 1)[-1].lower()
+                  for genre in g.get("genres", []) if genre in GENRE_LABELS][:2]
+        description = ("Un titolo di " + " e ".join(genres) + ". " if genres else "")
+        description += "Scopri dettagli e requisiti nella pagina del gioco."
+    parts = [f"🎮 <b>{html_escape(title)}</b>",
+             f"{platform_icon} {' / '.join(labels)}  ·  {availability}",
+             "", f"📝 <i>{html_escape(description)}</i>", ""]
+    if subscription:
+        parts.append("💳 Richiede un abbonamento attivo" + (" Amazon Prime" if "prime" in source.lower() or "amazon" in source.lower() else ""))
     date = format_date_it(g.get("end_date"))
     if date:
-        parts.append("Scade: " + html_escape(date))
+        parts.append("⏳ <b>Scade:</b> " + html_escape(date))
     if g.get("url"):
-        parts.append("Scarica da: " + text_link(g["url"], source))
+        parts.append("📥 <b>Scarica da:</b> " + text_link(g["url"], source))
     # Attribuzione richiesta dalle API, mantenuta compatta e cliccabile.
     if g.get("source_url") and urlparse(g.get("url", "")).hostname != urlparse(g["source_url"]).hostname:
-        parts.append("Fonte: " + text_link(g["source_url"], source))
+        parts.append("↗ " + text_link(g["source_url"], source))
     return "\n".join(parts)
 
 
@@ -1379,7 +1391,7 @@ async def send_game(chat_id: int, g: dict):
         label = "Cerca trailer o gameplay"
     else:
         label = "Guarda trailer / gameplay"
-    payload["text"] = caption + "\n" + text_link(trailer_url, label)
+    payload["text"] = caption + "\n▶️ " + text_link(trailer_url, label)
     result = await tg_api("sendMessage", **payload)
     if not result.get("ok"):
         raise RuntimeError(result.get("description", "Invio messaggio fallito"))
