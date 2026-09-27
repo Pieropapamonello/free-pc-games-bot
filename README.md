@@ -13,3 +13,16 @@ Deploy webhook su Render.
 
 Test di isolamento delle chat (senza inviare messaggi Telegram):
 `python -m unittest discover -s tests -v`.
+
+## Descrizioni e video
+
+Le descrizioni di tutte le fonti passano dalla traduzione in italiano, anche
+quando la fonte dichiara di essere localizzata. Dopo due tentativi falliti viene
+mostrato un avviso in italiano, senza pubblicare il testo originale inglese.
+Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
+
+Per ogni gioco il bot prova prima il video Steam e poi YouTube, anche se Telegram
+rifiuta il primo video. Se nessun video è inviabile, pubblica il testo con il link
+al trailer quando disponibile, senza foto. Non è garantita la disponibilità di
+un video per ogni gioco. Le descrizioni lunghe vengono inviate separatamente dal
+video per rispettare il limite della didascalia.

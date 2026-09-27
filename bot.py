@@ -146,18 +146,29 @@ def normalize_title(title: str) -> str:
     return t
 
 
+_translation_cache: dict[str, str] = {}
+TRANSLATION_UNAVAILABLE = "Descrizione in italiano momentaneamente non disponibile. Consulta la pagina del gioco dal link sotto."
+
+
 def translate_it(text: str) -> str:
     if not text:
         return text
     t = text.strip()
-    if len(t) < 5:
-        return t
-    try:
-        out = GoogleTranslator(source="auto", target="it").translate(t)
-        return (out or t).strip()
-    except Exception as e:
-        log.warning("Traduzione fallita: %s", e)
-        return t
+    if not t:
+        return ""
+    if t in _translation_cache:
+        return _translation_cache[t]
+    for attempt in range(2):
+        try:
+            out = GoogleTranslator(source="auto", target="it").translate(t[:4500])
+            if out and out.strip():
+                if len(_translation_cache) >= 512:
+                    _translation_cache.pop(next(iter(_translation_cache)))
+                _translation_cache[t] = out.strip()
+                return out.strip()
+        except Exception as e:
+            log.warning("Traduzione fallita (tentativo %d): %s", attempt + 1, e)
+    return TRANSLATION_UNAVAILABLE
 
 
 def format_price_eur(worth) -> Optional[str]:
@@ -781,7 +792,7 @@ async def fetch_reddit_all() -> list[dict]:
         clean = _clean_reddit_title(title)
         desc_raw = sel[:350].strip() if sel else ""
         if desc_raw:
-            desc = translate_it(desc_raw)
+            desc = desc_raw
         else:
             desc = f"Gioco gratuito su {source}. Riscatta dal link sotto."
         games.append({
@@ -945,8 +956,8 @@ def html_escape(text: str) -> str:
 def format_game(g: dict) -> str:
     title = clean_title(g["title"])
     desc = g.get("description", "") or ""
-    if g.get("translate", True):
-        desc = translate_it(desc)
+    # Anche le fonti richieste in italiano possono restituire testo inglese.
+    desc = translate_it(desc)
     if len(desc) > 380:
         desc = desc[:377] + "..."
     source = g.get("source", "?")
@@ -1212,51 +1223,52 @@ def _trailer_button(yt_url: Optional[str]) -> Optional[dict]:
 
 
 async def send_game(chat_id: int, g: dict):
-    yt = await search_youtube_video(clean_title(g["title"]))
-    yt_url = yt[0] if yt else None
-    yt_thumb = yt[1] if yt else None
-    caption = format_game(g)
-    button = _trailer_button(yt_url)
-    mp4 = None
-    if yt_url:
-        mp4 = await extract_youtube_mp4(yt_url)
-    if not mp4:
-        mp4 = await search_steam_trailer(g["title"])
-    if mp4:
+    # La traduzione usa richieste sincrone: non bloccare webhook e altre chat.
+    caption = await asyncio.to_thread(format_game, g)
+    steam_video = await search_steam_trailer(g["title"])
+    yt_url = None
+    tried = set()
+    for source in ("steam", "youtube"):
+        if source == "steam":
+            video = steam_video
+        else:
+            yt = await search_youtube_video(clean_title(g["title"]))
+            yt_url = yt[0] if yt else None
+            video = await extract_youtube_mp4(yt_url) if yt_url else None
+        if not video or video in tried:
+            continue
+        tried.add(video)
+        # Il limite delle didascalie e' inferiore a quello dei messaggi.
+        short_caption = caption if len(caption) <= 900 else html_escape(clean_title(g["title"]))[:200]
+        payload = dict(chat_id=chat_id, video=video, caption=short_caption,
+                       parse_mode="HTML", supports_streaming=True)
+        button = _trailer_button(yt_url)
+        if button:
+            payload["reply_markup"] = button
         try:
-            payload = dict(
-                chat_id=chat_id,
-                video=mp4,
-                caption=caption,
-                parse_mode="HTML",
-                supports_streaming=True,
-            )
-            if button:
-                payload["reply_markup"] = button
-            r = await tg_api("sendVideo", **payload)
-            if r.get("ok"):
-                return
-            log.info("sendVideo non OK, fallback foto: %s", r.get("description"))
-        except Exception as e:
-            log.warning("sendVideo fallita, fallback foto: %s", e)
-    photo = yt_thumb or g.get("image")
-    if photo:
-        try:
-            payload = dict(chat_id=chat_id, photo=photo, caption=caption, parse_mode="HTML")
-            if button:
-                payload["reply_markup"] = button
-            r = await tg_api("sendPhoto", **payload)
-            if r.get("ok"):
-                return
-            log.info("sendPhoto non OK, fallback testo: %s", r.get("description"))
-        except Exception as e:
-            log.warning("sendPhoto fallita, fallback testo: %s", e)
-    payload = dict(
-        chat_id=chat_id, text=caption, parse_mode="HTML", disable_web_page_preview=False
-    )
+            result = await tg_api("sendVideo", **payload)
+        except Exception as exc:
+            log.warning("Invio video %s fallito: %s", source, exc)
+            continue
+        if result.get("ok"):
+            if short_caption != caption:
+                result = await tg_api("sendMessage", chat_id=chat_id, text=caption,
+                                      parse_mode="HTML", disable_web_page_preview=True)
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("description", "Invio descrizione fallito"))
+            return
+        log.info("Video %s rifiutato: %s", source, result.get("description"))
+    # Non tutti i giochi hanno un trailer accessibile: conservare l'avviso,
+    # senza spacciare una copertina animata per un video del gioco.
+    payload = dict(chat_id=chat_id,
+                   text=caption + "\n\nVideo non disponibile per l'invio diretto.",
+                   parse_mode="HTML", disable_web_page_preview=True)
+    button = _trailer_button(yt_url or steam_video)
     if button:
         payload["reply_markup"] = button
-    await tg_api("sendMessage", **payload)
+    result = await tg_api("sendMessage", **payload)
+    if not result.get("ok"):
+        raise RuntimeError(result.get("description", "Invio messaggio fallito"))
 
 
 WELCOME_NEW = (
