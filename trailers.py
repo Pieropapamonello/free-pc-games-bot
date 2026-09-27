@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import time
+import weakref
 from pathlib import Path
 
 import aiohttp
@@ -39,19 +40,31 @@ def valid_duration(value):
 
 
 def identity(text):
-    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def title_matches(name, title):
+    words = re.findall(r"\w+", name.casefold())
+    wanted = re.findall(r"\w+", title.casefold())
+    marketing = set("official trailer launch reveal announcement gameplay cinematic story teaser "
+                    "english inglese eng italian italiano ita hd 4k 1080p 60fps".split())
+    if not wanted:
+        return False
+    for index in range(len(words) - len(wanted) + 1):
+        if words[index:index + len(wanted)] == wanted:
+            remaining = words[:index] + words[index + len(wanted):]
+            if remaining and all(word in marketing for word in remaining):
+                return True
+    return False
 
 
 def official_youtube(info, title, owners):
     name = str(info.get("title") or "")
     channel = identity(info.get("channel"))
-    advertised_title = re.sub(
-        r"\b(official|trailer|launch|reveal|announcement|gameplay|cinematic|story|teaser|"
-        r"english|inglese|eng|italian|italiano|ita|hd|4k|1080p|60fps)\b", "", name, flags=re.I)
     return bool(
         info.get("channel_is_verified") is True
         and channel and channel in {identity(owner) for owner in owners if owner}
-        and identity(title) and identity(title) == identity(advertised_title)
+        and title_matches(name, title)
         and re.search(r"\btrailer\b", name, re.I)
         and not re.search(r"fan.?made|reaction|concept|walkthrough", name, re.I)
         and not info.get("is_live")
@@ -83,6 +96,7 @@ async def probe(path):
 def media_duration(info):
     values = [info.get("format", {}).get("duration")]
     values += [s["duration"] for s in info.get("streams", []) if s.get("duration")]
+    values = [value for value in values if value not in (None, "", "N/A")]
     if not values or any(not valid_duration(value) for value in values):
         return None
     return max(float(value) for value in values)
@@ -90,7 +104,8 @@ def media_duration(info):
 
 class TrailerService:
     def __init__(self):
-        self.lock = asyncio.Lock()
+        self.locks = weakref.WeakValueDictionary()
+        self.slots = asyncio.Semaphore(2)
         self.cache = {}  # file_id or negative result; bounded, expires after 10 min/6 h
 
     async def candidates(self, title, steam):
@@ -134,13 +149,15 @@ class TrailerService:
                         if "channel_is_verified" not in info:
                             info["channel_is_verified"] = entry.get("channel_is_verified")
                         if official_youtube(info, title, owners):
-                            candidates.append({"url": url, "language": language_of(info), "kind": "youtube"})
+                            candidates.append({"url": url, "language": language_of(info),
+                                               "kind": "youtube", "duration": info["duration"]})
                 except Exception as exc:
                     log.info("Ricerca trailer ufficiale %s: %s", title, exc)
         return candidates
 
     async def prepare(self, candidate, session, directory, index):
         source = Path(directory) / f"source-{index}.mp4"
+        expected_duration = candidate.get("duration")
         if candidate["kind"] == "youtube":
             lang = candidate["language"]
             await command(
@@ -148,13 +165,16 @@ class TrailerService:
                 "--js-runtimes", "node", "--no-playlist", "--socket-timeout", "15", "--retries", "1",
                 "--max-filesize", str(MAX_DOWNLOAD),
                 "--match-filters", "duration <= 180 & !is_live",
-                "-f", f"best[ext=mp4][height<=720][language^={lang}]/best[ext=mp4][height<=720]",
+                "-f", (f"best[ext=mp4][height<=720][language^=?{lang}]/"
+                       f"bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a][language^=?{lang}]"),
+                "--merge-output-format", "mp4",
                 "-o", source, candidate["url"], timeout=120)
         elif candidate["kind"] == "steam_stream":
             # Modern Steam store trailers use HLS/DASH instead of MP4 URLs.
             # Validate the entire manifest before downloading, never trim it.
             remote = await probe(candidate["url"])
-            if media_duration(remote) is None:
+            expected_duration = media_duration(remote)
+            if expected_duration is None:
                 return None
             await command("ffmpeg", "-v", "error", "-y", "-rw_timeout", "20000000",
                           "-i", candidate["url"], "-map", "0:v:0", "-map", "0:a:0?",
@@ -177,6 +197,8 @@ class TrailerService:
         duration = media_duration(details)
         if duration is None or not any(s.get("codec_type") == "video" for s in details.get("streams", [])):
             return None
+        if expected_duration is not None and abs(duration - float(expected_duration)) > 0.5:
+            return None
         audio = [s for s in details.get("streams", []) if s.get("codec_type") == "audio"]
         raw_languages = [str(s.get("tags", {}).get("language") or "").lower() for s in audio]
         if any(raw not in ("", "und") and language_of({"language": raw}) is None for raw in raw_languages):
@@ -192,17 +214,19 @@ class TrailerService:
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
         await command("ffmpeg", "-v", "error", "-y", "-i", source,
                       "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:480",
-                      "-c:v", "libx264", "-preset", "veryfast", "-b:v", "1200k",
+                      "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-b:v", "1200k",
                       "-maxrate", "1400k", "-bufsize", "2800k", "-pix_fmt", "yuv420p",
                       "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", target,
                       timeout=180)
         checked = media_duration(await probe(target))
-        if checked is None or target.stat().st_size > MAX_UPLOAD:
+        if checked is None or abs(checked - duration) > 0.5 or target.stat().st_size > MAX_UPLOAD:
             return None
+        source.unlink(missing_ok=True)
         return {"path": target, "language": language, "duration": checked}
 
     async def send(self, chat_id, title, caption, steam, session, api, tg_api):
-        async with self.lock:
+        lock = self.locks.setdefault(title, asyncio.Lock())
+        async with lock, self.slots:
             cached = self.cache.get(title)
             if cached and cached["expires"] > time.monotonic():
                 if not cached.get("file_id"):
@@ -210,9 +234,15 @@ class TrailerService:
                 result = await tg_api("sendVideo", chat_id=chat_id, video=cached["file_id"],
                                       caption=caption, parse_mode="HTML", supports_streaming=True)
                 if not result.get("ok"):
-                    self.cache.pop(title, None)
-                    raise RuntimeError(result.get("description", "Invio trailer fallito"))
-                return True
+                    description = result.get("description", "Invio trailer fallito")
+                    if result.get("error_code") == 400 and any(word in description.lower() for word in ("file_id", "file identifier", "file reference")):
+                        self.cache.pop(title, None)
+                    else:
+                        # A chat-specific error or rate limit says nothing about
+                        # the validity of the shared Telegram video.
+                        raise RuntimeError(description)
+                else:
+                    return True
             if len(self.cache) >= 128:
                 self.cache.pop(next(iter(self.cache)))
             candidates = await self.candidates(title, steam)
@@ -227,6 +257,7 @@ class TrailerService:
                             prepared.append(trailer)
                     except Exception as exc:
                         log.info("Trailer scartato per %s: %s", title, exc)
+                delivery_error = None
                 for trailer in sorted(prepared, key=lambda t: t["language"] != "it"):
                     form = aiohttp.FormData()
                     for key, value in {"chat_id": str(chat_id), "caption": caption,
@@ -243,8 +274,11 @@ class TrailerService:
                         if file_id:
                             self.cache[title] = {"file_id": file_id, "expires": time.monotonic() + 21600}
                         return True
-                    if result.get("error_code") == 403:
-                        raise RuntimeError(result.get("description", "Forbidden"))
+                    delivery_error = result.get("description", "Invio trailer fallito")
+                    if result.get("error_code") in (403, 429) or result.get("error_code", 0) >= 500:
+                        raise RuntimeError(delivery_error)
                     log.info("Telegram rifiuta il trailer di %s: %s", title, result.get("description"))
+                if delivery_error:
+                    raise RuntimeError(delivery_error)
             self.cache[title] = {"expires": time.monotonic() + 600}
             return False

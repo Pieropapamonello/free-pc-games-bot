@@ -44,6 +44,21 @@ o link al video. Le richieste manuali senza risultati inviabili ricevono un
 messaggio di stato. Le ricerche senza esito sono memorizzate per 10 minuti;
 gli allegati già caricati riusano il file_id Telegram per 6 ore.
 
+Gli invii automatici salvano una ricevuta per gioco e chat in
+`delivery_receipts.json` e, se configurato, nel nodo Firebase `deliveries`.
+Un invio parziale viene ritentato soltanto per le chat ancora da raggiungere;
+il gioco viene segnato come completato dopo la consegna a tutti i destinatari
+interessati. Le ricevute vengono ricaricate al riavvio. Come per qualunque invio
+esterno, un arresto tra la consegna Telegram e il salvataggio della ricevuta può
+ancora causare una ripetizione; il lock tra istanze Firebase resta best-effort.
+
+Errori Telegram della singola chat e rate limit non invalidano la cache video
+delle altre chat. Due giochi possono essere preparati contemporaneamente;
+le richieste per lo stesso titolo condividono il lavoro. Sono supportati video
+e audio YouTube separati, e la durata viene confrontata prima e dopo la
+conversione per scartare download incompleti. La cache Steam scade dopo un'ora
+per i risultati riusciti e dopo un minuto per gli errori temporanei.
+
 La scheda mostra titolo in grassetto, icone per piattaforma e disponibilità,
 descrizione italiana in corsivo (massimo 150 caratteri), scadenza se nota e link
 testuale "Scarica da", con spaziatura tra intestazione, descrizione e link.

@@ -5,6 +5,7 @@ import asyncio
 import re
 import secrets
 import textwrap
+import time
 from html import unescape
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -227,7 +228,36 @@ class State:
         self.prefs: dict[int, set[str]] = {}
         self.genres_prefs: dict[int, set[str]] = {}
         self.content_prefs: dict[int, set[str]] = {}
+        self.deliveries: dict[str, set[int]] = {}
         self._load()
+        self._load_deliveries()
+
+    def _load_deliveries(self):
+        path = SENT_FILE.with_name("delivery_receipts.json")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.deliveries = {str(gid): {int(cid) for cid in chats} for gid, chats in data.items()}
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.deliveries = {}
+        if USE_FIREBASE:
+            try:
+                data = firebase_get("deliveries") or {}
+                for gid, chats in data.items():
+                    self.deliveries.setdefault(gid, set()).update(int(cid) for cid, ok in chats.items() if ok)
+            except Exception as exc:
+                log.warning("Lettura ricevute Firebase fallita: %s", exc)
+
+    def record_delivery(self, game_id: str, chat_id: int):
+        self.deliveries.setdefault(game_id, set()).add(chat_id)
+        path = SENT_FILE.with_name("delivery_receipts.json")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({gid: list(chats) for gid, chats in self.deliveries.items()}), encoding="utf-8")
+        temporary.replace(path)
+        if USE_FIREBASE:
+            try:
+                firebase_put(f"deliveries/{game_id}/{chat_id}", True)
+            except Exception as exc:
+                log.warning("Salvataggio ricevuta Firebase fallito: %s", exc)
 
     def _load(self):
         if USE_FIREBASE:
@@ -1180,7 +1210,7 @@ async def rawg_lookup(title: str) -> Optional[dict]:
     return result
 
 
-_steam_cache: dict[str, Optional[dict]] = {}
+_steam_cache: dict[str, tuple[float, Optional[dict]]] = {}
 
 
 def _title_variants(clean: str) -> list[str]:
@@ -1199,10 +1229,12 @@ def _title_variants(clean: str) -> list[str]:
 
 async def _steam_search_one(sess, term: str, key: str) -> Optional[int]:
     async with sess.get(
-        f"https://store.steampowered.com/api/storesearch/?term={term}&cc=IT&l=italian",
+        "https://store.steampowered.com/api/storesearch/",
+        params={"term": term, "cc": "IT", "l": "italian"},
         headers={"User-Agent": "Mozilla/5.0"},
     ) as r:
         sr = await r.json(content_type=None)
+    fallback = None
     for item in (sr.get("items") or [])[:5]:
         appid = item.get("id")
         if not appid:
@@ -1212,9 +1244,9 @@ async def _steam_search_one(sess, term: str, key: str) -> Optional[int]:
             return appid
         wanted = set(key.split())
         found = set(steam_title.split())
-        if wanted and len(wanted & found) / len(wanted) >= 0.6:
-            return appid
-    return None
+        if fallback is None and wanted and len(wanted & found) / len(wanted) >= 0.6:
+            fallback = appid
+    return fallback
 
 
 async def steam_lookup(title: str) -> Optional[dict]:
@@ -1222,8 +1254,9 @@ async def steam_lookup(title: str) -> Optional[dict]:
     {appid, description, image, trailer, price} oppure None. Risultato in cache."""
     clean = clean_title(title)
     key = normalize_title(clean)
-    if key in _steam_cache:
-        return _steam_cache[key]
+    cached = _steam_cache.get(key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
     sess = await get_session()
     result = None
     try:
@@ -1261,7 +1294,9 @@ async def steam_lookup(title: str) -> Optional[dict]:
     except Exception as e:
         log.info("Steam lookup fallito per '%s': %s", title, e)
         result = None
-    _steam_cache[key] = result
+    if len(_steam_cache) >= 256 and key not in _steam_cache:
+        _steam_cache.pop(next(iter(_steam_cache)))
+    _steam_cache[key] = (time.monotonic() + (3600 if result else 60), result)
     return result
 
 
@@ -1762,6 +1797,7 @@ async def _broadcast_new_games(seed_only: bool = False):
         # I giochi senza trailer restano pendenti per i controlli successivi.
         log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
+        recipients = {g["id"]: set() for g in new}
         for chat_id in list(state.chats):
             prefs = state.get_prefs(chat_id)
             chat_games = filter_by_content(new, state.get_content(chat_id))
@@ -1770,10 +1806,13 @@ async def _broadcast_new_games(seed_only: bool = False):
             if not chat_games:
                 continue
             for g in chat_games:
+                recipients[g["id"]].add(chat_id)
+            for g in chat_games:
+                if chat_id in state.deliveries.get(g["id"], set()):
+                    continue
                 try:
-                    if await send_game(chat_id, g) is not False:
-                        if g["id"] not in state.sent:
-                            state.mark_sent([g["id"]])
+                    if await send_game(chat_id, g):
+                        await asyncio.to_thread(state.record_delivery, g["id"], chat_id)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     msg = str(e).lower()
@@ -1783,6 +1822,9 @@ async def _broadcast_new_games(seed_only: bool = False):
                     log.warning("Errore invio chat %s: %s", chat_id, e)
         for cid in dead:
             state.unsubscribe(cid)
+        complete = [gid for gid, targets in recipients.items()
+                    if targets and (targets & state.chats) <= state.deliveries.get(gid, set())]
+        state.mark_sent(complete)
     except Exception as e:
         log.exception("Errore broadcast: %s", e)
 

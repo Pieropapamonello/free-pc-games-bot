@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,15 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_title_words_are_not_removed_as_marketing_labels(self):
+        info = {"title": "Cave Story Official Launch Trailer", "channel": "Publisher",
+                "channel_is_verified": True, "duration": 120, "language": "en"}
+        self.assertTrue(trailers.official_youtube(info, "Cave Story", ["Publisher"]))
+
+    def test_known_stream_duration_without_container_duration(self):
+        self.assertEqual(trailers.media_duration({"streams": [{"duration": "120"}]}), 120)
+        self.assertIsNone(trailers.media_duration({"streams": [{"duration": "181"}]}))
+
     def test_duration_boundary_and_unknown_values(self):
         for value in (1, 179.9, 180, "180"):
             self.assertTrue(trailers.valid_duration(value))
@@ -57,6 +67,59 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_truncated_stream_is_rejected_before_conversion(self):
+        service = trailers.TrailerService()
+        with tempfile.TemporaryDirectory() as directory:
+            async def download(*args, **kwargs):
+                Path(directory, "source-0.mp4").write_bytes(b"truncated")
+            with patch.object(trailers, "command", AsyncMock(side_effect=download)) as command, \
+                 patch.object(trailers, "probe", AsyncMock(side_effect=[
+                     {"format": {"duration": "180"}},
+                     {"format": {"duration": "120"}, "streams": [{"codec_type": "video"}]}])):
+                prepared = await service.prepare({"kind": "steam_stream", "language": "en",
+                    "url": "https://example.com/trailer.m3u8"}, None, directory, 0)
+            self.assertIsNone(prepared)
+            self.assertEqual(command.await_count, 1)
+
+    async def test_youtube_can_merge_video_and_audio_without_selecting_foreign_audio(self):
+        import yt_dlp
+        service = trailers.TrailerService()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(trailers, "command", AsyncMock()) as command:
+                await service.prepare({"kind": "youtube", "language": "en", "url": "https://youtube.com/watch?v=abcdefghijk"},
+                                      None, directory, 0)
+        args = command.await_args.args
+        specification = args[args.index("-f") + 1]
+        with yt_dlp.YoutubeDL({"quiet": True}) as downloader:
+            select = downloader.build_format_selector(specification)
+            chosen = list(select({"formats": [
+                {"format_id": "video", "ext": "mp4", "height": 480, "vcodec": "avc1", "acodec": "none", "url": "https://example.com/video"},
+                {"format_id": "english", "ext": "m4a", "language": "en", "vcodec": "none", "acodec": "mp4a", "url": "https://example.com/en"},
+                {"format_id": "french", "ext": "m4a", "language": "fr", "vcodec": "none", "acodec": "mp4a", "url": "https://example.com/fr"},
+            ], "has_merged_format": False, "incomplete_formats": False}))
+        self.assertEqual(chosen[0]["format_id"], "video+english")
+
+    async def test_blocked_chat_does_not_invalidate_shared_file_id(self):
+        service = trailers.TrailerService()
+        service.cache["Example"] = {"file_id": "cached-video", "expires": time.monotonic() + 100}
+        api = AsyncMock(return_value={"ok": False, "error_code": 403, "description": "Forbidden"})
+        with self.assertRaises(RuntimeError):
+            await service.send(1, "Example", "Caption", {}, UploadSession(), "api", api)
+        self.assertEqual(service.cache["Example"]["file_id"], "cached-video")
+
+    async def test_rate_limit_does_not_cache_missing_trailer(self):
+        service = trailers.TrailerService()
+        session = UploadSession([{"ok": False, "error_code": 429, "description": "Too Many Requests"}])
+        async def prepare(candidate, session, directory, index):
+            path = Path(directory) / "en.mp4"
+            path.write_bytes(b"video")
+            return {"path": path, "language": "en", "duration": 120}
+        with patch.object(service, "candidates", AsyncMock(return_value=[{"language": "en"}])), \
+             patch.object(service, "prepare", prepare):
+            with self.assertRaises(RuntimeError):
+                await service.send(1, "Example", "Caption", {}, session, "api", AsyncMock())
+        self.assertNotIn("Example", service.cache)
+
     async def test_steam_streaming_trailers_are_discovered(self):
         service = trailers.TrailerService()
         candidates = await service.candidates("Example", {"official_match": True,
@@ -113,6 +176,26 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 class RetryTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_start.StartRoutingTests.asyncSetUp
+
+    async def test_partial_delivery_retries_only_failed_chat_after_restart(self):
+        bot = test_start.bot
+        bot.state.chats = {101, 202}
+        bot.state._save_chats()
+        game = dict(self.games[0], id="pending")
+        async def first_attempt(chat_id, game):
+            if chat_id == 202:
+                raise RuntimeError("Temporary Telegram failure")
+            return True
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=[game])), \
+             patch.object(bot, "send_game", AsyncMock(side_effect=first_attempt)):
+            await bot.broadcast_new_games()
+        self.assertNotIn("pending", bot.state.sent)
+        bot.state = bot.State()
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=[game])), \
+             patch.object(bot, "send_game", AsyncMock(return_value=True)) as send:
+            await bot.broadcast_new_games()
+        send.assert_awaited_once_with(202, game)
+        self.assertIn("pending", bot.state.sent)
 
     async def test_unavailable_trailer_is_not_marked_as_sent(self):
         bot = test_start.bot
