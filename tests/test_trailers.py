@@ -58,15 +58,43 @@ class Response:
 class UploadSession:
     def __init__(self, responses=None):
         self.uploads = []
+        self.urls = []
         self.responses = responses or [{"ok": True, "result": {"video": {"file_id": "cached-video"}}}]
 
     def post(self, url, *, data, timeout):
+        self.urls.append(url)
         fields = {header["name"]: value for header, _, value in data._fields}
         self.uploads.append({**fields, "video": fields["video"].read()})
         return Response(self.responses.pop(0))
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uploaded_video_replaces_existing_text_card(self):
+        import json
+        service = trailers.TrailerService()
+        session = UploadSession()
+        async def prepare(candidate, session, directory, index):
+            path = Path(directory) / "en.mp4"
+            path.write_bytes(b"video")
+            return {"path": path, "language": "en", "duration": 120}
+        with patch.object(service, "candidates", AsyncMock(return_value=[{"language": "en"}])), \
+             patch.object(service, "prepare", prepare):
+            self.assertTrue(await service.send(1, "Example", "Caption", {}, session, "api", AsyncMock(), message_id=37))
+        self.assertEqual(session.urls, ["api/editMessageMedia"])
+        self.assertEqual(session.uploads[0]["message_id"], "37")
+        media = json.loads(session.uploads[0]["media"])
+        self.assertEqual(media["media"], "attach://video")
+        self.assertEqual(media["caption"], "Caption")
+
+    async def test_cached_video_replaces_existing_text_card(self):
+        service = trailers.TrailerService()
+        service.cache["Example"] = {"file_id": "cached-video", "expires": time.monotonic() + 100}
+        api = AsyncMock(return_value={"ok": True})
+        self.assertTrue(await service.send(1, "Example", "Caption", {}, UploadSession(), "api", api, message_id=37))
+        self.assertEqual(api.await_args.args[0], "editMessageMedia")
+        self.assertEqual(api.await_args.kwargs["message_id"], 37)
+        self.assertEqual(api.await_args.kwargs["media"]["media"], "cached-video")
+
     async def test_truncated_stream_is_rejected_before_conversion(self):
         service = trailers.TrailerService()
         with tempfile.TemporaryDirectory() as directory:

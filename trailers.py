@@ -224,15 +224,21 @@ class TrailerService:
         source.unlink(missing_ok=True)
         return {"path": target, "language": language, "duration": checked}
 
-    async def send(self, chat_id, title, caption, steam, session, api, tg_api):
+    async def send(self, chat_id, title, caption, steam, session, api, tg_api, *, message_id=None):
         lock = self.locks.setdefault(title, asyncio.Lock())
         async with lock, self.slots:
             cached = self.cache.get(title)
             if cached and cached["expires"] > time.monotonic():
                 if not cached.get("file_id"):
                     return False
-                result = await tg_api("sendVideo", chat_id=chat_id, video=cached["file_id"],
-                                      caption=caption, parse_mode="HTML", supports_streaming=True)
+                if message_id is None:
+                    result = await tg_api("sendVideo", chat_id=chat_id, video=cached["file_id"],
+                                          caption=caption, parse_mode="HTML", supports_streaming=True)
+                else:
+                    result = await tg_api("editMessageMedia", chat_id=chat_id, message_id=message_id,
+                                          media={"type": "video", "media": cached["file_id"],
+                                                 "caption": caption, "parse_mode": "HTML",
+                                                 "supports_streaming": True})
                 if not result.get("ok"):
                     description = result.get("description", "Invio trailer fallito")
                     if result.get("error_code") == 400 and any(word in description.lower() for word in ("file_id", "file identifier", "file reference")):
@@ -260,13 +266,22 @@ class TrailerService:
                 delivery_error = None
                 for trailer in sorted(prepared, key=lambda t: t["language"] != "it"):
                     form = aiohttp.FormData()
-                    for key, value in {"chat_id": str(chat_id), "caption": caption,
-                                       "parse_mode": "HTML", "supports_streaming": "true",
-                                       "duration": str(math.ceil(trailer["duration"]))}.items():
+                    fields = {"chat_id": str(chat_id), "caption": caption,
+                              "parse_mode": "HTML", "supports_streaming": "true",
+                              "duration": str(math.ceil(trailer["duration"]))}
+                    method = "sendVideo"
+                    if message_id is not None:
+                        method = "editMessageMedia"
+                        fields = {"chat_id": str(chat_id), "message_id": str(message_id),
+                                  "media": json.dumps({"type": "video", "media": "attach://video",
+                                                       "caption": caption, "parse_mode": "HTML",
+                                                       "supports_streaming": True,
+                                                       "duration": math.ceil(trailer["duration"])})}
+                    for key, value in fields.items():
                         form.add_field(key, value)
                     with trailer["path"].open("rb") as video:
                         form.add_field("video", video, filename="trailer.mp4", content_type="video/mp4")
-                        async with session.post(f"{api}/sendVideo", data=form,
+                        async with session.post(f"{api}/{method}", data=form,
                                                 timeout=aiohttp.ClientTimeout(total=150)) as response:
                             result = await response.json()
                     if result.get("ok"):

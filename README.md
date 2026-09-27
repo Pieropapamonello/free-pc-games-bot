@@ -22,8 +22,12 @@ scheda usa una breve alternativa italiana basata sui metadati disponibili,
 senza pubblicare il testo originale inglese.
 Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
 
-Ogni scheda viene pubblicata con un trailer ufficiale allegato: italiano prima,
-inglese come alternativa, durata effettiva massima 180 secondi. I trailer più
+Ogni gioco viene mostrato subito con una scheda testuale, descrizione e link di
+riscatto. La ricerca del trailer avviene in background e non blocca gli altri
+risultati. Quando disponibile, il trailer viene allegato alla stessa scheda
+tramite `editMessageMedia`, senza inviare un secondo messaggio.
+I trailer devono essere ufficiali: italiano prima, inglese come alternativa,
+durata effettiva massima 180 secondi. I trailer più
 lunghi vengono esclusi, non tagliati. Il file viene scaricato, verificato con
 ffprobe, convertito in MP4 H.264/AAC e caricato su Telegram (massimo 45 MB).
 Il Dockerfile installa ffmpeg/ffprobe e Node.js (richiesto da yt-dlp per YouTube);
@@ -38,14 +42,16 @@ da un'indicazione esplicita nel titolo. Il semplice parametro `l=italian` della
 pagina Steam non prova la lingua del video. Giochi senza corrispondenza Steam,
 canali con alias diversi e video senza lingua dichiarata possono essere esclusi.
 
-Se non esiste un trailer verificabile e inviabile, la scheda viene saltata e
-resta pendente per i controlli successivi. Nessun ripiego con immagini, pulsanti
-o link al video. Le richieste manuali senza risultati inviabili ricevono un
-messaggio di stato. Le ricerche senza esito sono memorizzate per 10 minuti;
+Se non esiste un trailer verificabile e inviabile, oppure la ricerca fallisce,
+la scheda del gioco resta visibile. Non vengono usati immagini, pulsanti o link
+al video in sostituzione. Le attività media hanno un limite di 5 minuti e una
+coda massima di 256 attività; vengono annullate alla chiusura del bot senza
+rimuovere le schede già inviate. Le ricerche senza esito sono memorizzate per 10 minuti;
 gli allegati già caricati riusano il file_id Telegram per 6 ore.
 
 Gli invii automatici salvano una ricevuta per gioco e chat in
 `delivery_receipts.json` e, se configurato, nel nodo Firebase `deliveries`.
+Le ricevute riguardano l'invio della scheda, indipendentemente dal trailer.
 Un invio parziale viene ritentato soltanto per le chat ancora da raggiungere;
 il gioco viene segnato come completato dopo la consegna a tutti i destinatari
 interessati. Le ricevute vengono ricaricate al riavvio. Come per qualunque invio

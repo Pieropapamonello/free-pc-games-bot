@@ -1300,27 +1300,40 @@ async def steam_lookup(title: str) -> Optional[dict]:
     return result
 
 
+_media_tasks: set[asyncio.Task] = set()
+
+
+async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: str):
+    try:
+        # The card is already visible; slow media lookup must not hold up games.
+        async with asyncio.timeout(300):
+            info = await steam_lookup(g["title"])
+            if g.get("enrich_description") and info and info.get("description"):
+                enriched = await asyncio.to_thread(format_game, dict(g, description=info["description"]))
+                if len(enriched) <= 1000:
+                    caption = enriched
+            await trailer_service.send(chat_id, clean_title(g["title"]), caption, info,
+                                       await get_session(), API, tg_api, message_id=message_id)
+    except Exception as exc:
+        log.info("Scheda mantenuta senza trailer per %s: %s", g["title"], exc)
+
+
 async def send_game(chat_id: int, g: dict):
-    info = await steam_lookup(g["title"])
-    if g.get("enrich_description"):
-        description_info = info
-        if not description_info or not description_info.get("description"):
-            description_info = await rawg_lookup(g["title"])
-        if description_info and description_info.get("description"):
-            g = dict(g, description=description_info["description"])
     caption = await asyncio.to_thread(format_game, g)
-    # Keep the description attached to the video. No separate text-only card.
+    # Keep the card short enough to become the video caption later.
     if len(caption) > 1000:
         compact = dict(g, title=clean_title(g["title"])[:100], description="", source_url="")
         caption = await asyncio.to_thread(format_game, compact)
-    if len(caption) > 1000:
-        log.warning("Scheda troppo lunga: %s", g["title"])
-        return False
-    sent = await trailer_service.send(chat_id, clean_title(g["title"]), caption, info,
-                                      await get_session(), API, tg_api)
-    if not sent:
-        log.info("Scheda rinviata: nessun trailer ufficiale IT/EN <=180s per %s", g["title"])
-    return sent
+    result = await tg_api("sendMessage", chat_id=chat_id, text=caption,
+                          parse_mode="HTML", disable_web_page_preview=True)
+    if not result.get("ok"):
+        raise RuntimeError(result.get("description", "Invio scheda fallito"))
+    message_id = (result.get("result") or {}).get("message_id")
+    if message_id is not None and len(caption) <= 1000 and len(_media_tasks) < 256:
+        task = asyncio.create_task(_attach_game_trailer(chat_id, message_id, dict(g), caption))
+        _media_tasks.add(task)
+        task.add_done_callback(_media_tasks.discard)
+    return True
 
 
 WELCOME_NEW = (
@@ -1600,7 +1613,7 @@ async def _handle_giochi(chat_id: int):
                 log.warning("send_game fallito: %s", e)
         if not delivered:
             await tg_api("sendMessage", chat_id=chat_id,
-                         text="Nessun trailer ufficiale in italiano o inglese entro 3 minuti disponibile per i giochi trovati. Riprova piu tardi.")
+                         text="Non sono riuscito a inviare le schede dei giochi. Riprova tra poco.")
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
 
@@ -1649,7 +1662,7 @@ async def _handle_cerca(chat_id: int, query: str):
                 log.warning("send_game (cerca) fallito: %s", e)
         if not delivered:
             await tg_api("sendMessage", chat_id=chat_id,
-                         text="Giochi trovati, ma nessun trailer ufficiale IT/EN entro 3 minuti è disponibile per l'invio.")
+                         text="Giochi trovati, ma non sono riuscito a inviare le schede. Riprova tra poco.")
     except Exception as e:
         log.exception("Errore /cerca: %s", e)
 
@@ -1794,7 +1807,7 @@ async def _broadcast_new_games(seed_only: bool = False):
         # Lock anti-duplicati: se un'altra istanza sta già inviando, salta.
         if not state.acquire_broadcast_lock():
             return
-        # I giochi senza trailer restano pendenti per i controlli successivi.
+        # Le ricevute tracciano la scheda; il trailer viene aggiunto in seguito.
         log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
         recipients = {g["id"]: set() for g in new}
@@ -1921,8 +1934,13 @@ async def on_startup(app: web.Application):
 
 async def on_cleanup(app: web.Application):
     t = app.get("broadcaster")
+    pending = list(_media_tasks)
     if t:
-        t.cancel()
+        pending.append(t)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     if _session and not _session.closed:
         await _session.close()
 
