@@ -16,11 +16,9 @@ from aiohttp import web
 from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 
-try:
-    import yt_dlp
-    _YTDLP_OK = True
-except Exception:
-    _YTDLP_OK = False
+from trailers import TrailerService
+
+trailer_service = TrailerService()
 
 load_dotenv()
 
@@ -1257,7 +1255,9 @@ async def steam_lookup(title: str) -> Optional[dict]:
                     trailer = f"https://cdn.akamai.steamstatic.com/steam/apps/{m['id']}/movie480.mp4"
                 if trailer and trailer.startswith("//"):
                     trailer = "https:" + trailer
-            result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price}
+            result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price,
+                      "official_match": normalize_title(det.get("name", "")) == key,
+                      "movies": movies, "owners": (det.get("developers") or []) + (det.get("publishers") or [])}
     except Exception as e:
         log.info("Steam lookup fallito per '%s': %s", title, e)
         result = None
@@ -1265,136 +1265,27 @@ async def steam_lookup(title: str) -> Optional[dict]:
     return result
 
 
-async def search_steam_trailer(title: str) -> Optional[str]:
-    info = await steam_lookup(title)
-    return info.get("trailer") if info else None
-
-
-_YT_BLOCKED = False  # diventa True se YouTube blocca l'IP (datacenter) per evitare retry inutili
-
-
-def _ytdlp_extract_mp4_sync(youtube_url: str) -> Optional[str]:
-    global _YT_BLOCKED
-    if not _YTDLP_OK or _YT_BLOCKED:
-        return None
-    opts = {
-        "format": "best[ext=mp4][height<=480][filesize<19M]/best[ext=mp4][height<=360]/best[height<=480][ext=mp4]",
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "skip_download": True,
-        "socket_timeout": 12,
-        # client mobile: a volte aggira il "Sign in to confirm you're not a bot" sui datacenter
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            return info.get("url")
-    except Exception as e:
-        emsg = str(e)
-        if "Sign in to confirm" in emsg or "not a bot" in emsg:
-            _YT_BLOCKED = True
-            log.warning("YouTube blocca l'IP per estrazione video: disabilito yt-dlp (uso thumbnail+link)")
-        else:
-            log.info("yt-dlp extract fallita per %s: %s", youtube_url, emsg[:120])
-        return None
-
-
-async def extract_youtube_mp4(youtube_url: str) -> Optional[str]:
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_ytdlp_extract_mp4_sync, youtube_url),
-            timeout=15,
-        )
-    except asyncio.TimeoutError:
-        log.info("yt-dlp timeout per %s", youtube_url)
-        return None
-    except Exception as e:
-        log.info("yt-dlp errore: %s", e)
-        return None
-
-
-async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
-    """Restituisce (video_url, thumbnail_url) oppure None."""
-    sess = await get_session()
-    from urllib.parse import quote_plus
-    q = quote_plus(f"{query} gameplay trailer")
-    url = f"https://www.youtube.com/results?search_query={q}&hl=it&gl=IT"
-    try:
-        async with sess.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "it,en;q=0.7",
-        }) as r:
-            html = await r.text()
-    except Exception as e:
-        log.info("YouTube fetch fallita: %s", e)
-        return None
-    m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
-    if not m:
-        return None
-    vid = m.group(1)
-    return (
-        f"https://www.youtube.com/watch?v={vid}",
-        f"https://img.youtube.com/vi/{vid}/hqdefault.jpg",
-    )
-
-
 async def send_game(chat_id: int, g: dict):
+    info = await steam_lookup(g["title"])
     if g.get("enrich_description"):
-        info = await steam_lookup(g["title"])
-        if not info or not info.get("description"):
-            info = await rawg_lookup(g["title"])
-        if info and info.get("description"):
-            g = dict(g, description=info["description"])
-    # La traduzione usa richieste sincrone: non bloccare webhook e altre chat.
+        description_info = info
+        if not description_info or not description_info.get("description"):
+            description_info = await rawg_lookup(g["title"])
+        if description_info and description_info.get("description"):
+            g = dict(g, description=description_info["description"])
     caption = await asyncio.to_thread(format_game, g)
-    steam_video = await search_steam_trailer(g["title"])
-    yt_url = None
-    tried = set()
-    for source in ("steam", "youtube"):
-        if source == "steam":
-            video = steam_video
-        else:
-            yt = await search_youtube_video(clean_title(g["title"]))
-            yt_url = yt[0] if yt else None
-            video = await extract_youtube_mp4(yt_url) if yt_url else None
-        if not video or video in tried:
-            continue
-        tried.add(video)
-        # Il limite delle didascalie e' inferiore a quello dei messaggi.
-        short_caption = caption if len(caption) <= 900 else html_escape(clean_title(g["title"])[:160])
-        payload = dict(chat_id=chat_id, video=video, caption=short_caption,
-                       parse_mode="HTML", supports_streaming=True)
-        try:
-            result = await tg_api("sendVideo", **payload)
-        except Exception as exc:
-            log.warning("Invio video %s fallito: %s", source, exc)
-            continue
-        if result.get("ok"):
-            if short_caption != caption:
-                result = await tg_api("sendMessage", chat_id=chat_id, text=caption,
-                                      parse_mode="HTML", disable_web_page_preview=True)
-                if not result.get("ok"):
-                    raise RuntimeError(result.get("description", "Invio descrizione fallito"))
-            return
-        log.info("Video %s rifiutato: %s", source, result.get("description"))
-    # Non tutti i giochi hanno un trailer accessibile: conservare l'avviso,
-    # senza spacciare una copertina animata per un video del gioco.
-    payload = dict(chat_id=chat_id,
-                   text=caption + "\n\nVideo non disponibile per l'invio diretto.",
-                   parse_mode="HTML", disable_web_page_preview=True)
-    trailer_url = yt_url or steam_video
-    if not trailer_url:
-        from urllib.parse import quote_plus
-        trailer_url = "https://www.youtube.com/results?search_query=" + quote_plus(clean_title(g["title"]) + " gameplay trailer")
-        label = "Cerca trailer o gameplay"
-    else:
-        label = "Guarda trailer / gameplay"
-    payload["text"] = caption + "\n▶️ " + text_link(trailer_url, label)
-    result = await tg_api("sendMessage", **payload)
-    if not result.get("ok"):
-        raise RuntimeError(result.get("description", "Invio messaggio fallito"))
+    # Keep the description attached to the video. No separate text-only card.
+    if len(caption) > 1000:
+        compact = dict(g, title=clean_title(g["title"])[:100], description="", source_url="")
+        caption = await asyncio.to_thread(format_game, compact)
+    if len(caption) > 1000:
+        log.warning("Scheda troppo lunga: %s", g["title"])
+        return False
+    sent = await trailer_service.send(chat_id, clean_title(g["title"]), caption, info,
+                                      await get_session(), API, tg_api)
+    if not sent:
+        log.info("Scheda rinviata: nessun trailer ufficiale IT/EN <=180s per %s", g["title"])
+    return sent
 
 
 WELCOME_NEW = (
@@ -1665,11 +1556,16 @@ async def _handle_giochi(chat_id: int):
         if not games:
             await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco trovato per i tuoi filtri. Cambia con /piattaforme, /generi o /contenuti.")
             return
+        delivered = 0
         for g in games[:12]:
             try:
-                await send_game(chat_id, g)
+                if await send_game(chat_id, g):
+                    delivered += 1
             except Exception as e:
                 log.warning("send_game fallito: %s", e)
+        if not delivered:
+            await tg_api("sendMessage", chat_id=chat_id,
+                         text="Nessun trailer ufficiale in italiano o inglese entro 3 minuti disponibile per i giochi trovati. Riprova piu tardi.")
     except Exception as e:
         log.exception("Errore /giochi: %s", e)
 
@@ -1709,11 +1605,16 @@ async def _handle_cerca(chat_id: int, query: str):
                 text=f"Nessun gioco gratis trovato per «{query}». Prova con un nome diverso o /giochi per vedere tutti.",
             )
             return
+        delivered = 0
         for g in matches[:8]:
             try:
-                await send_game(chat_id, g)
+                if await send_game(chat_id, g):
+                    delivered += 1
             except Exception as e:
                 log.warning("send_game (cerca) fallito: %s", e)
+        if not delivered:
+            await tg_api("sendMessage", chat_id=chat_id,
+                         text="Giochi trovati, ma nessun trailer ufficiale IT/EN entro 3 minuti è disponibile per l'invio.")
     except Exception as e:
         log.exception("Errore /cerca: %s", e)
 
@@ -1825,7 +1726,17 @@ async def _finish_content(chat_id: int, msg_id: int, chosen: str, cb_id: str):
         pass
 
 
+_broadcast_lock = asyncio.Lock()
+
+
 async def broadcast_new_games(seed_only: bool = False):
+    if _broadcast_lock.locked():
+        return
+    async with _broadcast_lock:
+        await _broadcast_new_games(seed_only)
+
+
+async def _broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
         games = await fetch_all_games()
@@ -1848,9 +1759,7 @@ async def broadcast_new_games(seed_only: bool = False):
         # Lock anti-duplicati: se un'altra istanza sta già inviando, salta.
         if not state.acquire_broadcast_lock():
             return
-        # Marca SUBITO come inviati (prima dell'invio): se un'altra istanza parte
-        # adesso, vedrà questi giochi come già visti e non li rimanderà.
-        state.mark_sent([g["id"] for g in new])
+        # I giochi senza trailer restano pendenti per i controlli successivi.
         log.info("Trovati %d nuovi giochi, controllo invio a %d chat", len(new), len(state.chats))
         dead = []
         for chat_id in list(state.chats):
@@ -1862,7 +1771,9 @@ async def broadcast_new_games(seed_only: bool = False):
                 continue
             for g in chat_games:
                 try:
-                    await send_game(chat_id, g)
+                    if await send_game(chat_id, g) is not False:
+                        if g["id"] not in state.sent:
+                            state.mark_sent([g["id"]])
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     msg = str(e).lower()

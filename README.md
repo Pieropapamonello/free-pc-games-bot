@@ -22,11 +22,27 @@ scheda usa una breve alternativa italiana basata sui metadati disponibili,
 senza pubblicare il testo originale inglese.
 Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
 
-Per ogni gioco il bot prova prima il video Steam e poi YouTube, anche se Telegram
-rifiuta il primo video. Se nessun video è inviabile, pubblica il testo con il link
-al trailer quando disponibile, senza foto. Non è garantita la disponibilità di
-un video per ogni gioco. Le descrizioni lunghe vengono inviate separatamente dal
-video per rispettare il limite della didascalia.
+Ogni scheda viene pubblicata con un trailer ufficiale allegato: italiano prima,
+inglese come alternativa, durata effettiva massima 180 secondi. I trailer più
+lunghi vengono esclusi, non tagliati. Il file viene scaricato, verificato con
+ffprobe, convertito in MP4 H.264/AAC e caricato su Telegram (massimo 45 MB).
+Il Dockerfile installa ffmpeg/ffprobe e Node.js (richiesto da yt-dlp per YouTube);
+per l'avvio locale devono essere nel PATH. Installare `requirements.txt` in un
+ambiente virtuale Python.
+
+Fonti ammesse: video etichettati come trailer nella pagina Steam del titolo
+corrispondente; su YouTube, canali verificati il cui nome corrisponde esattamente
+a sviluppatore/editore dichiarato su Steam, con titolo del gioco e durata
+verificabili. La lingua deve risultare dai metadati del video, dai tag audio o
+da un'indicazione esplicita nel titolo. Il semplice parametro `l=italian` della
+pagina Steam non prova la lingua del video. Giochi senza corrispondenza Steam,
+canali con alias diversi e video senza lingua dichiarata possono essere esclusi.
+
+Se non esiste un trailer verificabile e inviabile, la scheda viene saltata e
+resta pendente per i controlli successivi. Nessun ripiego con immagini, pulsanti
+o link al video. Le richieste manuali senza risultati inviabili ricevono un
+messaggio di stato. Le ricerche senza esito sono memorizzate per 10 minuti;
+gli allegati già caricati riusano il file_id Telegram per 6 ore.
 
 La scheda mostra titolo in grassetto, icone per piattaforma e disponibilità,
 descrizione italiana in corsivo (massimo 150 caratteri), scadenza se nota e link
@@ -35,8 +51,6 @@ Se la traduzione fallisce, la scheda usa i generi noti e un breve rimando ai
 dettagli del gioco: non mostra messaggi tecnici sulla traduzione.
 Telegram può andare ulteriormente a capo in base allo schermo e alla dimensione
 del font. Sono rimossi hashtag, prezzo originale e pulsanti del trailer.
-Quando il video non è inviabile viene inserito un link nel testo; se non è stato
-trovato alcun trailer, il link è esplicitamente una ricerca YouTube.
 Le condizioni di abbonamento e la distinzione DLC/free-to-play restano visibili.
 
 ## Fonti
