@@ -45,6 +45,15 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.tg_api.await_args.args[0], "sendVideo")
         self.assertEqual(bot.tg_api.await_args.kwargs["video"], "https://example.com/steam.mp4")
         bot.search_youtube_video.assert_not_awaited()
+        self.assertNotIn("reply_markup", bot.tg_api.await_args.kwargs)
+
+    async def test_missing_trailer_offers_a_labeled_search_link(self):
+        bot.search_steam_trailer.return_value = None
+        bot.search_youtube_video.return_value = None
+        await bot.send_game(101, self.game)
+        self.assertEqual(bot.tg_api.await_args.args[0], "sendMessage")
+        self.assertIn("Cerca trailer o gameplay", bot.tg_api.await_args.kwargs["text"])
+        self.assertNotIn("reply_markup", bot.tg_api.await_args.kwargs)
 
     async def test_rejected_steam_video_tries_youtube(self):
         bot.tg_api.side_effect = [{"ok": False}, {"ok": True}]
@@ -57,7 +66,8 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
         await bot.send_game(101, self.game)
         self.assertEqual([c.args[0] for c in bot.tg_api.await_args_list],
                          ["sendVideo", "sendVideo", "sendMessage"])
-        self.assertIn("reply_markup", bot.tg_api.await_args.kwargs)
+        self.assertNotIn("reply_markup", bot.tg_api.await_args.kwargs)
+        self.assertIn('<a href="https://youtube.com/watch?v=example">', bot.tg_api.await_args.kwargs["text"])
         self.assertTrue(bot.tg_api.await_args.kwargs["disable_web_page_preview"])
 
     async def test_long_description_is_sent_separately(self):

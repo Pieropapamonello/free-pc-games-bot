@@ -4,6 +4,9 @@ import logging
 import asyncio
 import re
 import secrets
+import textwrap
+from html import unescape
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -432,9 +435,9 @@ async def tg_api(method: str, **params) -> dict:
     return {"ok": False}
 
 
-async def fetch_json(url: str) -> Any:
+async def fetch_json(url: str, *, user_agent: str = "Mozilla/5.0") -> Any:
     sess = await get_session()
-    async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+    async with sess.get(url, headers={"User-Agent": user_agent}) as r:
         r.raise_for_status()
         return await r.json(content_type=None)
 
@@ -543,6 +546,7 @@ async def _fetch_gamerpower_one(platform: str, gtype: str = "game") -> list[dict
             "platform": platforms_str,
             "end_date": it.get("end_date", "N/D"),
             "source": source,
+            "source_url": "https://www.gamerpower.com/",
             "worth": it.get("worth", "N/A"),
             "translate": True,
             "categories": _categorize(platforms_str),
@@ -553,8 +557,9 @@ async def _fetch_gamerpower_one(platform: str, gtype: str = "game") -> list[dict
 
 
 async def fetch_gamerpower_all() -> list[dict]:
-    platforms = GAMERPOWER_PC_PLATFORMS + GAMERPOWER_CONSOLE_PLATFORMS + GAMERPOWER_MOBILE_PLATFORMS
-    results = await asyncio.gather(*[_fetch_gamerpower_one(p, "game") for p in platforms])
+    # L'endpoint senza piattaforma include anche itch.io e futuri store,
+    # senza una raffica di richieste duplicate allo stesso servizio.
+    results = [await _fetch_gamerpower_one("", "game")]
     out, seen = [], set()
     for batch in results:
         for g in batch:
@@ -766,7 +771,7 @@ async def fetch_reddit_all() -> list[dict]:
                                  "mod announcement", "discussion", "weekly thread",
                                  "subreddit", "free game findings community")):
             continue
-        if any(k in flair for k in ("mod", "meta", "discussion", "announcement")):
+        if any(k in flair for k in ("mod", "meta", "discussion", "announcement", "expired", "ended")):
             continue
         link_l = link_url.lower()
         title_l = tl
@@ -788,7 +793,15 @@ async def fetch_reddit_all() -> list[dict]:
              any(k in title_l for k in ("(android)", "[android]", "(ios)", "[ios]", "(mobile)", "[mobile]")):
             cats, source = ["android"], "Mobile Store"
         else:
-            continue
+            host = (urlparse(link_url).hostname or "").lower()
+            pc_stores = {"steampowered.com": "Steam", "epicgames.com": "Epic Games",
+                         "gog.com": "GOG", "itch.io": "itch.io",
+                         "indiegala.com": "IndieGala", "ubisoft.com": "Ubisoft"}
+            store = next((label for domain, label in pc_stores.items()
+                          if host == domain or host.endswith("." + domain)), None)
+            if not store or not re.search(r"[\[(]game[\])]", tl):
+                continue
+            cats, source = ["pc"], store
         clean = _clean_reddit_title(title)
         desc_raw = sel[:350].strip() if sel else ""
         if desc_raw:
@@ -897,16 +910,132 @@ async def fetch_prime_gaming() -> list[dict]:
     return games
 
 
+async def fetch_freetogame() -> list[dict]:
+    """Catalogo free-to-play, distinto dalle promozioni a tempo."""
+    try:
+        data = await fetch_json("https://www.freetogame.com/api/games?sort-by=release-date")
+        if not isinstance(data, list):
+            return []
+        games = []
+        for item in data:
+            if not isinstance(item, dict) or not item.get("title") or not item.get("game_url"):
+                continue
+            # Escludi eventuali annunci di giochi non ancora usciti.
+            release = item.get("release_date") or ""
+            if release and release > datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+                continue
+            desc = item.get("short_description") or ""
+            games.append({
+                "id": f"ftg_{item['id']}", "title": item["title"],
+                "description": desc, "url": item["game_url"],
+                "platform": item.get("platform", "PC"), "categories": ["pc"],
+                "source": "FreeToGame", "source_url": "https://www.freetogame.com/",
+                "content_type": "game", "access_model": "free_to_play",
+                "catalog": "freetogame", "genres": detect_genres(item.get("genre", ""), desc),
+            })
+        return games
+    except Exception as exc:
+        log.warning("FreeToGame non disponibile: %s", exc)
+        return []
+
+
+async def fetch_mmobomb_giveaways() -> list[dict]:
+    """Solo pacchetti/ricompense identificabili; no beta o concorsi ambigui."""
+    try:
+        data = await fetch_json("https://www.mmobomb.com/api1/giveaways")
+        if not isinstance(data, list):
+            return []
+        games = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title") or ""
+            if not title or not item.get("giveaway_url"):
+                continue
+            if str(item.get("keys_left", "")).strip() in ("0", "0%", "0.00%"):
+                continue
+            if re.search(r"beta|playtest|early access", title, re.I):
+                continue
+            if not re.search(r"pack|gift|reward|loot|skin|item", title, re.I):
+                continue
+            games.append({
+                "id": f"mmobomb_{item['id']}", "title": title,
+                "description": item.get("short_description") or "",
+                "url": item["giveaway_url"], "categories": ["pc"],
+                "source": "MMOBomb", "source_url": "https://www.mmobomb.com/",
+                "content_type": "dlc", "genres": [],
+            })
+        return games
+    except Exception as exc:
+        log.warning("MMOBomb non disponibile: %s", exc)
+        return []
+
+
+async def fetch_cheapshark() -> list[dict]:
+    """Offerte realmente a zero, escludendo giochi normalmente gratuiti."""
+    from urllib.parse import quote, unquote
+    games = []
+    try:
+        # Prezzo crescente: fermarsi appena iniziano le offerte a pagamento.
+        for page in range(5):
+            data = await fetch_json(
+                f"https://www.cheapshark.com/api/1.0/deals?upperPrice=1&pageSize=60&sortBy=Price&pageNumber={page}",
+                user_agent="free-pc-games-bot/1.0")
+            if not isinstance(data, list) or not data:
+                break
+            paid = False
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    sale = float(item["salePrice"])
+                    normal = float(item["normalPrice"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if sale > 0:
+                    paid = True
+                    continue
+                if sale != 0 or normal <= 0 or str(item.get("isOnSale")) != "1":
+                    continue
+                if not item.get("title") or not item.get("dealID"):
+                    continue
+                title = item["title"]
+                games.append({
+                    "id": f"cheapshark_{item['gameID']}", "title": title,
+                    "description": "Offerta gratuita a tempo. Verifica disponibilità e condizioni nella pagina dello store.",
+                    "enrich_description": True,
+                    "url": "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(item["dealID"]), safe=""),
+                    "source": "CheapShark", "source_url": "https://www.cheapshark.com/",
+                    "categories": ["pc"], "genres": [],
+                    "content_type": "dlc" if re.search(r"\b(dlc|expansion|soundtrack)\b", title, re.I) else "game",
+                })
+            if paid or len(data) < 60:
+                break
+    except Exception as exc:
+        log.warning("CheapShark non disponibile: %s", exc)
+    return games
+
+
 async def fetch_all_games() -> list[dict]:
-    epic, gp, reddit, prime, loot = await asyncio.gather(
+    batches = await asyncio.gather(
         fetch_epic_free(),
         fetch_gamerpower_all(),
         fetch_reddit_all(),
         fetch_prime_gaming(),
         fetch_gamerpower_loot(),
+        fetch_cheapshark(),
+        fetch_mmobomb_giveaways(),
+        fetch_freetogame(),
+        return_exceptions=True,
     )
     seen, unique = set(), []
-    for g in epic + gp + reddit + prime + loot:
+    games = []
+    for batch in batches:
+        if isinstance(batch, BaseException):
+            log.warning("Fonte non disponibile: %s", batch)
+            continue
+        games.extend(batch)
+    for g in games:
         # la chiave include il tipo: un gioco e un suo DLC non si annullano a vicenda
         key = (g.get("content_type", "game"), normalize_title(g["title"]))
         if key in seen:
@@ -953,62 +1082,45 @@ def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def compact_description(text: str) -> str:
+    plain = unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    translated = translate_it(" ".join(plain.split()))
+    # Tre righe logiche brevi. Telegram decide il wrapping sul dispositivo.
+    return "\n".join(textwrap.wrap(translated, width=42, max_lines=3, placeholder="…"))
+
+
+def text_link(url: str, label: str) -> str:
+    if urlparse(url).scheme not in ("http", "https"):
+        return html_escape(label)
+    return f'<a href="{html_escape(url).replace(chr(34), "&quot;")}">{html_escape(label)}</a>'
+
+
 def format_game(g: dict) -> str:
     title = clean_title(g["title"])
-    desc = g.get("description", "") or ""
-    # Anche le fonti richieste in italiano possono restituire testo inglese.
-    desc = translate_it(desc)
-    if len(desc) > 380:
-        desc = desc[:377] + "..."
-    source = g.get("source", "?")
     cats = set(g.get("categories") or ["pc"])
-    ctype = g.get("content_type", "game")
-    is_prime = "prime" in source.lower() or "amazon" in source.lower()
-    plat_label = "PC" if "pc" in cats else ("CONSOLE" if "console" in cats else "ANDROID")
-    if ctype == "dlc":
-        header = f"🎁 DLC / CONTENUTO GRATIS ({plat_label})"
-    elif ctype == "subscription":
-        header = f"💳 GRATIS CON ABBONAMENTO ({plat_label})"
-    elif is_prime:
-        header = "🎁 GRATIS SU PRIME GAMING"
-    elif cats == {"console"}:
-        header = "🎁 GRATIS SU CONSOLE"
-    elif cats == {"android"}:
-        header = "🎁 GRATIS SU ANDROID"
-    elif "console" in cats and "pc" not in cats:
-        header = "🎁 GRATIS SU CONSOLE"
-    else:
-        header = "🎁 GRATIS SU PC"
-    parts = [f"<b>{html_escape(header)}</b>", ""]
-    parts.append(f"<b>{html_escape(title.upper())}</b>")
-    if desc:
-        parts.append("")
-        parts.append(html_escape(desc))
-    parts.append("")
-    plat_tag = "#PC" if "pc" in cats else ("#Console" if "console" in cats else "#Android")
-    tags = [plat_tag, hashtag(source)]
-    line = " ".join(t for t in tags if t)
-    price = format_price_eur(g.get("worth"))
-    if price:
-        line = f"{line}  ·  Valore {price}"
-    parts.append(html_escape(line))
+    labels = [label for cat, label in (("pc", "PC"), ("console", "Console"),
+                                      ("android", "Android / iOS")) if cat in cats]
+    if "browser" in (g.get("platform") or "").lower():
+        labels.append("Browser")
+    parts = [f"<b>{html_escape(title)}</b>",
+             "Piattaforma: " + " / ".join(labels),
+             "Descrizione: " + html_escape(compact_description(g.get("description", "")) or
+                                          "Consulta i dettagli nella pagina del gioco.")]
+    source = g.get("source") or "Pagina del gioco"
+    if g.get("access_model") == "free_to_play":
+        parts.append("Tipo: free-to-play")
+    elif g.get("content_type") == "dlc":
+        parts.append("Tipo: DLC / contenuti aggiuntivi")
+    if g.get("content_type") == "subscription" or any(x in source.lower() for x in ("prime", "amazon")):
+        parts.append("Richiede un abbonamento attivo" + (" Amazon Prime" if "prime" in source.lower() or "amazon" in source.lower() else ""))
     date = format_date_it(g.get("end_date"))
     if date:
-        parts.append(html_escape(f"Scade il {date}"))
-    elif is_prime:
-        parts.append("Riscattabile fino a fine periodo Prime (vedi su Amazon)")
-    if is_prime:
-        parts.append("")
-        parts.append("⚠️ <b>Richiede un abbonamento Amazon Prime attivo.</b>")
-    # link del gioco: URL in chiaro -> Telegram lo rende cliccabile (e copiabile)
-    url = g.get("url")
-    if url:
-        label = "🎮 Riscatta qui:" if is_prime else "🔗 Scarica qui:"
-        parts.append("")
-        parts.append(f"{label} {html_escape(url)}")
-    if is_prime:
-        parts.append("")
-        parts.append(f"🛒 Non hai Prime? Attivalo qui: {PRIME_AFFILIATE}")
+        parts.append("Scade: " + html_escape(date))
+    if g.get("url"):
+        parts.append("Scarica da: " + text_link(g["url"], source))
+    # Attribuzione richiesta dalle API, mantenuta compatta e cliccabile.
+    if g.get("source_url") and urlparse(g.get("url", "")).hostname != urlparse(g["source_url"]).hostname:
+        parts.append("Fonte: " + text_link(g["source_url"], source))
     return "\n".join(parts)
 
 
@@ -1216,13 +1328,13 @@ async def search_youtube_video(query: str) -> Optional[tuple[str, str]]:
     )
 
 
-def _trailer_button(yt_url: Optional[str]) -> Optional[dict]:
-    if not yt_url:
-        return None
-    return {"inline_keyboard": [[{"text": "▶️ Guarda trailer", "url": yt_url}]]}
-
-
 async def send_game(chat_id: int, g: dict):
+    if g.get("enrich_description"):
+        info = await steam_lookup(g["title"])
+        if not info or not info.get("description"):
+            info = await rawg_lookup(g["title"])
+        if info and info.get("description"):
+            g = dict(g, description=info["description"])
     # La traduzione usa richieste sincrone: non bloccare webhook e altre chat.
     caption = await asyncio.to_thread(format_game, g)
     steam_video = await search_steam_trailer(g["title"])
@@ -1239,12 +1351,9 @@ async def send_game(chat_id: int, g: dict):
             continue
         tried.add(video)
         # Il limite delle didascalie e' inferiore a quello dei messaggi.
-        short_caption = caption if len(caption) <= 900 else html_escape(clean_title(g["title"]))[:200]
+        short_caption = caption if len(caption) <= 900 else html_escape(clean_title(g["title"])[:160])
         payload = dict(chat_id=chat_id, video=video, caption=short_caption,
                        parse_mode="HTML", supports_streaming=True)
-        button = _trailer_button(yt_url)
-        if button:
-            payload["reply_markup"] = button
         try:
             result = await tg_api("sendVideo", **payload)
         except Exception as exc:
@@ -1263,9 +1372,14 @@ async def send_game(chat_id: int, g: dict):
     payload = dict(chat_id=chat_id,
                    text=caption + "\n\nVideo non disponibile per l'invio diretto.",
                    parse_mode="HTML", disable_web_page_preview=True)
-    button = _trailer_button(yt_url or steam_video)
-    if button:
-        payload["reply_markup"] = button
+    trailer_url = yt_url or steam_video
+    if not trailer_url:
+        from urllib.parse import quote_plus
+        trailer_url = "https://www.youtube.com/results?search_query=" + quote_plus(clean_title(g["title"]) + " gameplay trailer")
+        label = "Cerca trailer o gameplay"
+    else:
+        label = "Guarda trailer / gameplay"
+    payload["text"] = caption + "\n" + text_link(trailer_url, label)
     result = await tg_api("sendMessage", **payload)
     if not result.get("ok"):
         raise RuntimeError(result.get("description", "Invio messaggio fallito"))
@@ -1703,6 +1817,12 @@ async def broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
         games = await fetch_all_games()
+        # Il primo caricamento del catalogo permanente non e' una novita:
+        # resta consultabile con /giochi e /cerca senza centinaia di notifiche.
+        for catalog in {g["catalog"] for g in games if g.get("catalog")}:
+            marker = f"catalog_initialized_{catalog}_v1"
+            if marker not in state.sent:
+                state.mark_sent([marker] + [g["id"] for g in games if g.get("catalog") == catalog])
         new = [g for g in games if g["id"] not in state.sent]
         if not new:
             log.info("Nessun nuovo gioco.")
