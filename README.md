@@ -18,12 +18,14 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 
 Le descrizioni di tutte le fonti passano dalla traduzione in italiano, anche
 quando la fonte dichiara di essere localizzata. Dopo due tentativi falliti la
-scheda usa una breve alternativa italiana basata sui metadati disponibili,
-senza pubblicare il testo originale inglese.
+scheda conserva la descrizione originale della fonte, anche se inglese,
+invece di sostituirla con una frase generica. I metadati vengono usati soltanto
+quando la fonte non fornisce una descrizione.
 Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
 
-Ogni gioco viene mostrato subito con una scheda testuale, descrizione e link di
-riscatto. La ricerca del trailer avviene in background e non blocca gli altri
+Ogni gioco viene mostrato con il banner originale della fonte, descrizione e link
+di riscatto. Se il banner manca o Telegram lo rifiuta, viene mostrata la scheda
+testuale. La ricerca del trailer avviene in background e non blocca gli altri
 risultati. Quando disponibile, il trailer viene allegato alla stessa scheda
 tramite `editMessageMedia`, senza inviare un secondo messaggio.
 I trailer devono essere ufficiali: italiano prima, inglese come alternativa,
@@ -43,8 +45,8 @@ pagina Steam non prova la lingua del video. Giochi senza corrispondenza Steam,
 canali con alias diversi e video senza lingua dichiarata possono essere esclusi.
 
 Se non esiste un trailer verificabile e inviabile, oppure la ricerca fallisce,
-la scheda del gioco resta visibile. Non vengono usati immagini, pulsanti o link
-al video in sostituzione. Le attività media hanno un limite di 5 minuti e una
+la scheda con il banner resta visibile. Non vengono aggiunti pulsanti al video.
+Le attività media hanno un limite di 5 minuti e una
 coda massima di 256 attività; vengono annullate alla chiusura del bot senza
 rimuovere le schede già inviate. Le ricerche senza esito sono memorizzate per 10 minuti;
 gli allegati già caricati riusano il file_id Telegram per 6 ore.
@@ -65,11 +67,10 @@ e audio YouTube separati, e la durata viene confrontata prima e dopo la
 conversione per scartare download incompleti. La cache Steam scade dopo un'ora
 per i risultati riusciti e dopo un minuto per gli errori temporanei.
 
-La scheda mostra titolo in grassetto, icone per piattaforma e disponibilità,
-descrizione italiana in corsivo (massimo 150 caratteri), scadenza se nota e link
-testuale "Scarica da", con spaziatura tra intestazione, descrizione e link.
-Se la traduzione fallisce, la scheda usa i generi noti e un breve rimando ai
-dettagli del gioco: non mostra messaggi tecnici sulla traduzione.
+La scheda riprende il layout con banner in alto, intestazione "GRATIS SU…",
+titolo in grassetto maiuscolo e descrizione leggibile (massimo 280 caratteri),
+scadenza se nota e link "Scarica da", separati da spaziatura.
+Non mostra messaggi tecnici sulla traduzione.
 Telegram può andare ulteriormente a capo in base allo schermo e alla dimensione
 del font. Sono rimossi hashtag, prezzo originale e pulsanti del trailer.
 Le condizioni di abbonamento e la distinzione DLC/free-to-play restano visibili.

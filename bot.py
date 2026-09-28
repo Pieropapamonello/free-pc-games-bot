@@ -956,6 +956,7 @@ async def fetch_freetogame() -> list[dict]:
             games.append({
                 "id": f"ftg_{item['id']}", "title": item["title"],
                 "description": desc, "url": item["game_url"],
+                "image": item.get("thumbnail") or "",
                 "platform": item.get("platform", "PC"), "categories": ["pc"],
                 "source": "FreeToGame", "source_url": "https://www.freetogame.com/",
                 "content_type": "game", "access_model": "free_to_play",
@@ -989,6 +990,7 @@ async def fetch_mmobomb_giveaways() -> list[dict]:
             games.append({
                 "id": f"mmobomb_{item['id']}", "title": title,
                 "description": item.get("short_description") or "",
+                "image": item.get("main_image") or item.get("thumbnail") or "",
                 "url": item["giveaway_url"], "categories": ["pc"],
                 "source": "MMOBomb", "source_url": "https://www.mmobomb.com/",
                 "content_type": "dlc", "genres": [],
@@ -1032,6 +1034,7 @@ async def fetch_cheapshark() -> list[dict]:
                     "id": f"cheapshark_{item['gameID']}", "title": title,
                     "description": "Offerta gratuita a tempo. Verifica disponibilità e condizioni nella pagina dello store.",
                     "enrich_description": True,
+                    "image": item.get("thumb") or "",
                     "url": "https://www.cheapshark.com/redirect?dealID=" + quote(unquote(item["dealID"]), safe=""),
                     "source": "CheapShark", "source_url": "https://www.cheapshark.com/",
                     "categories": ["pc"], "genres": [],
@@ -1114,9 +1117,10 @@ def compact_description(text: str) -> str:
     plain = unescape(re.sub(r"<[^>]+>", " ", text or ""))
     translated = translate_it(" ".join(plain.split()))
     if translated == TRANSLATION_UNAVAILABLE:
-        return ""
+        # Una traduzione fallita non deve cancellare la descrizione del gioco.
+        translated = " ".join(plain.split())
     # Paragrafo breve senza interruzioni artificiali nel mezzo delle frasi.
-    return textwrap.shorten(translated, width=150, placeholder="…")
+    return textwrap.shorten(translated, width=280, placeholder="…")
 
 
 def text_link(url: str, label: str) -> str:
@@ -1133,24 +1137,24 @@ def format_game(g: dict) -> str:
     if "browser" in (g.get("platform") or "").lower():
         labels.append("Browser")
     source = g.get("source") or "Pagina del gioco"
-    platform_icon = "🖥" if "pc" in cats else ("🎮" if "console" in cats else "📱")
-    availability = "🎁 Gratis"
+    platform = " / ".join(labels).upper()
+    availability = f"🎁 GRATIS SU {platform}"
     if g.get("access_model") == "free_to_play":
-        availability = "🆓 Free-to-play"
+        availability = f"🎮 FREE-TO-PLAY · {platform}"
     elif g.get("content_type") == "dlc":
-        availability = "🎁 DLC / contenuti"
+        availability = f"🎁 DLC / CONTENUTI · {platform}"
     subscription = g.get("content_type") == "subscription" or any(x in source.lower() for x in ("prime", "amazon"))
     if subscription:
-        availability = "💳 Con abbonamento"
+        availability = f"💳 CON ABBONAMENTO · {platform}"
     description = compact_description(g.get("description", ""))
     if not description:
         genres = [GENRE_LABELS[genre].split(" ", 1)[-1].lower()
                   for genre in g.get("genres", []) if genre in GENRE_LABELS][:2]
         description = ("Un titolo di " + " e ".join(genres) + ". " if genres else "")
         description += "Scopri dettagli e requisiti nella pagina del gioco."
-    parts = [f"🎮 <b>{html_escape(title)}</b>",
-             f"{platform_icon} {' / '.join(labels)}  ·  {availability}",
-             "", f"📝 <i>{html_escape(description)}</i>", ""]
+    parts = [f"<b>{html_escape(availability)}</b>", "",
+             f"<b>{html_escape(title.upper())}</b>", "",
+             html_escape(description), ""]
     if subscription:
         parts.append("💳 Richiede un abbonamento attivo" + (" Amazon Prime" if "prime" in source.lower() or "amazon" in source.lower() else ""))
     date = format_date_it(g.get("end_date"))
@@ -1322,10 +1326,21 @@ async def send_game(chat_id: int, g: dict):
     caption = await asyncio.to_thread(format_game, g)
     # Keep the card short enough to become the video caption later.
     if len(caption) > 1000:
-        compact = dict(g, title=clean_title(g["title"])[:100], description="", source_url="")
+        compact = dict(g, title=clean_title(g["title"])[:100], source_url="")
         caption = await asyncio.to_thread(format_game, compact)
-    result = await tg_api("sendMessage", chat_id=chat_id, text=caption,
-                          parse_mode="HTML", disable_web_page_preview=True)
+    result = None
+    banner = g.get("image") or g.get("thumbnail")
+    if banner and urlparse(banner).scheme in ("https", "http") and len(caption) <= 1000:
+        try:
+            result = await tg_api("sendPhoto", chat_id=chat_id, photo=banner,
+                                  caption=caption, parse_mode="HTML")
+        except Exception as exc:
+            log.info("Banner non inviabile per %s: %s", g["title"], exc)
+        if result and not result.get("ok") and result.get("error_code") in (403, 429):
+            raise RuntimeError(result.get("description", "Invio banner fallito"))
+    if not result or not result.get("ok"):
+        result = await tg_api("sendMessage", chat_id=chat_id, text=caption,
+                              parse_mode="HTML", disable_web_page_preview=True)
     if not result.get("ok"):
         raise RuntimeError(result.get("description", "Invio scheda fallito"))
     message_id = (result.get("result") or {}).get("message_id")

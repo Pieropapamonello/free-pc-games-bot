@@ -84,10 +84,10 @@ class CardTests(unittest.TestCase):
             description = bot.compact_description("text")
             card = bot.format_game({"title": "Example", "description": "text",
                                     "source": "Steam", "url": "https://store.steampowered.com/"})
-        self.assertLessEqual(len(description), 150)
+        self.assertLessEqual(len(description), 280)
         self.assertNotIn("\n", description)
-        self.assertIn("🖥 PC", card)
-        self.assertIn("📝 <i>", card)
+        self.assertIn("🎁 GRATIS SU PC", card)
+        self.assertIn("<b>EXAMPLE</b>\n\n", card)
         self.assertIn('Scarica da:</b> <a href=', card)
         self.assertNotIn("#", card)
         self.assertNotIn("Valore", card)

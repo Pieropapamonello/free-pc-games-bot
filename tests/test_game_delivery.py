@@ -9,6 +9,14 @@ class TranslationTests(unittest.TestCase):
     def setUp(self):
         bot._translation_cache.clear()
 
+    def test_failed_translation_preserves_real_source_description(self):
+        original = "Celebrate Castlevania's 40th Anniversary and claim the original NES classic."
+        with patch.object(bot, "translate_it", return_value=bot.TRANSLATION_UNAVAILABLE):
+            card = bot.format_game({"title": "Castlevania", "description": original})
+        self.assertIn(original, card)
+        self.assertNotIn("Scopri dettagli", card)
+        self.assertNotIn(bot.TRANSLATION_UNAVAILABLE, card)
+
     def test_epic_description_is_translated_despite_source_flag(self):
         with patch.object(bot, "GoogleTranslator") as translator:
             translator.return_value.translate.return_value = "Esplora un mondo fantastico."
@@ -46,6 +54,23 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         if bot._media_tasks:
             await asyncio.gather(*list(bot._media_tasks))
+
+    async def test_banner_is_sent_with_description_and_kept_when_video_is_missing(self):
+        self.send.return_value = False
+        game = dict(self.game, image="https://example.com/banner.jpg")
+        self.assertTrue(await bot.send_game(101, game))
+        await asyncio.gather(*list(bot._media_tasks))
+        self.assertEqual(bot.tg_api.await_count, 1)
+        self.assertEqual(bot.tg_api.await_args.args[0], "sendPhoto")
+        self.assertEqual(bot.tg_api.await_args.kwargs["photo"], game["image"])
+        self.assertEqual(bot.tg_api.await_args.kwargs["caption"], "Descrizione italiana")
+
+    async def test_unavailable_banner_still_shows_the_game(self):
+        bot.tg_api.side_effect = [{"ok": False, "error_code": 400, "description": "Invalid photo"},
+                                 {"ok": True, "result": {"message_id": 37}}]
+        self.assertTrue(await bot.send_game(101, dict(self.game, image="https://example.com/banner.jpg")))
+        await asyncio.gather(*list(bot._media_tasks))
+        self.assertEqual([call.args[0] for call in bot.tg_api.await_args_list], ["sendPhoto", "sendMessage"])
 
     async def test_video_is_attached_to_the_existing_card_with_caption(self):
         self.assertTrue(await bot.send_game(101, self.game))
