@@ -42,8 +42,17 @@ Nelle schede singole il titolo apre WhatsApp con il testo del gioco precompilato
 Il link gameplay cerca prima video italiani e poi video in qualsiasi lingua,
 verificando la corrispondenza del titolo; se la ricerca non riesce resta un link
 "Cerca gameplay". Le ricerche avvengono in background con massimo due attivita'.
-I trailer YouTube ufficiali hanno priorita' tra i candidati della stessa lingua;
-resta il limite di 180 secondi e la verifica del canale sviluppatore/editore.
+Si provano prima i trailer Steam del gioco esatto e i file MP4/WebM indicati
+come trailer nel sito dell'editore collegato da Steam o nella pagina itch del
+gioco. Non si scaricano giochi o video generici. Si preferiscono i trailer
+italiani dichiarati e i trailer di lancio. YouTube/Nello viene cercato soltanto
+quando nessun video diretto e' utilizzabile. Resta il limite di 180 secondi,
+verificato sul file completo, senza tagliare trailer piu' lunghi.
+Se la lingua manca nei metadati, Tesseract analizza cinque fotogrammi: il testo
+visibile deve fornire almeno otto parole e 50 caratteri, con riconoscimento
+linguistico italiano/inglese di confidenza >=90%. Questa e' una verifica del
+testo visibile, non del parlato. Se non basta, il trailer viene scartato e resta
+il banner. Il Dockerfile include Tesseract con i dati inglesi e italiani.
 
 Il client `nello_downloader.py` supporta lo Space YouTube di Nello:
 su Render impostare `NELLO_YOUTUBE_URL=https://bicimonello-nello-youtube.hf.space`

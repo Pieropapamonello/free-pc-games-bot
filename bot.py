@@ -1631,7 +1631,8 @@ async def steam_lookup(title: str) -> Optional[dict]:
                     trailer = "https:" + trailer
             result = {"appid": appid, "description": desc, "image": image, "trailer": trailer, "price": price,
                       "official_match": normalize_title(det.get("name", "")) == key,
-                      "movies": movies, "owners": (det.get("developers") or []) + (det.get("publishers") or [])}
+                      "movies": movies, "owners": (det.get("developers") or []) + (det.get("publishers") or []),
+                      "official_pages": [det["website"]] if det.get("website") and normalize_title(det.get("name", "")) == key else []}
     except Exception as e:
         log.info("Steam lookup fallito per '%s': %s", title, e)
         result = None
@@ -1671,6 +1672,8 @@ async def _process_game_media(chat_id: int, message_id: int, g: dict, caption: s
                     if response.get("ok"):
                         caption = updated
             info = await steam_lookup(display_title(g["title"]))
+            if (urlparse(g.get("url", "")).hostname or "").endswith(".itch.io"):
+                info = dict(info or {}, official_pages=list((info or {}).get("official_pages", [])) + [g["url"]])
             if g.get("enrich_description") and info and info.get("description"):
                 enriched = await asyncio.to_thread(format_game, dict(g, description=info["description"]))
                 if telegram_text_size(enriched) <= 1000 and TRANSLATION_UNAVAILABLE not in enriched:

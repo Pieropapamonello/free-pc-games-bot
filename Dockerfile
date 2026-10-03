@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs tesseract-ocr tesseract-ocr-eng tesseract-ocr-ita \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

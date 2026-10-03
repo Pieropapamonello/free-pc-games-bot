@@ -10,6 +10,16 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_visible_text_language_requires_substantial_language_evidence(self):
+        self.assertEqual(trailers.text_language("Explore the city and discover a world of monsters. Play with your friends and fight to save the world."), "en")
+        self.assertEqual(trailers.text_language("Esplora la città e scopri un mondo pieno di mostri. Gioca con i tuoi amici e combatti per salvare il mondo."), "it")
+        self.assertIsNone(trailers.text_language("GigaBash PC Steam 2026"))
+        self.assertIsNone(trailers.text_language("Explorez la ville et découvrez un monde rempli de monstres. Jouez avec vos amis pour sauver le monde."))
+
+    def test_publisher_page_finds_direct_trailer_but_not_embedded_youtube(self):
+        html = '<a href="/media/game-trailer-English.mp4">Official trailer</a><video><source src="/media/game-trailer-English.mp4"></video><a href="https://youtube.com/watch?v=abcdefghijk">Trailer</a><a href="/game-download.mp4">Download</a>'
+        candidates = trailers.page_trailers(html, "https://publisher.example/game")
+        self.assertEqual(candidates, [{"url": "https://publisher.example/media/game-trailer-English.mp4", "kind": "publisher", "language": "en"}])
     def test_game_trailer_accepts_platform_suffix_but_excludes_dlc(self):
         self.assertTrue(trailers.title_matches("GigaBash Official Launch Trailer | Nintendo Switch", "GigaBash"))
         self.assertTrue(trailers.title_matches("GigaBash - Official launch trailer (PC + PlayStation)", "GigaBash"))
@@ -75,6 +85,48 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publisher_video_urls_reject_private_addresses(self):
+        with patch.object(trailers.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
+            self.assertFalse(await trailers.public_https("https://publisher.example/trailer.mp4"))
+        self.assertFalse(await trailers.public_https("http://publisher.example/trailer.mp4"))
+
+    async def test_usable_store_video_does_not_search_youtube(self):
+        service = trailers.TrailerService()
+        async def prepare(candidate, session, directory, index):
+            path = Path(directory) / "store.mp4"
+            path.write_bytes(b"video")
+            return {"path": path, "language": "en", "duration": 90}
+        with patch.object(service, "candidates", AsyncMock(return_value=[{"kind": "steam", "language": "en"}])) as candidates, patch.object(service, "prepare", prepare):
+            self.assertTrue(await service.send(1, "Example", "Caption", {}, UploadSession(), "api", AsyncMock()))
+        candidates.assert_awaited_once_with("Example", {}, youtube=False)
+
+    async def test_youtube_searched_only_after_store_candidates_fail(self):
+        service = trailers.TrailerService()
+        async def prepare(candidate, session, directory, index):
+            if candidate["kind"] == "steam":
+                return None
+            path = Path(directory) / "fallback.mp4"
+            path.write_bytes(b"video")
+            return {"path": path, "language": "en", "duration": 90}
+        local = {"kind": "steam", "language": None}
+        youtube = {"kind": "youtube", "language": "en"}
+        with patch.object(service, "candidates", AsyncMock(side_effect=[[local], [local, youtube]])) as candidates, patch.object(service, "prepare", prepare):
+            self.assertTrue(await service.send(1, "Example", "Caption", {}, UploadSession(), "api", AsyncMock()))
+        self.assertEqual(candidates.await_count, 2)
+
+    async def test_unknown_metadata_can_use_language_of_visible_video_text(self):
+        service = trailers.TrailerService()
+        details = {"format": {"duration": "90"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio", "tags": {"language": "und"}}]}
+        async def convert(*args, **kwargs):
+            Path(args[-1]).write_bytes(b"converted")
+            return b""
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "source-0.mp4").write_bytes(b"downloaded")
+            with patch.object(trailers, "probe", AsyncMock(return_value=details)), patch.object(trailers, "visual_language", AsyncMock(return_value="en")) as visual, patch.object(trailers, "command", convert):
+                result = await service.prepare({"kind": "nello", "language": None}, None, folder, 0)
+            self.assertEqual(result["language"], "en")
+            visual.assert_awaited_once()
+
     async def test_publisher_linked_trailer_reaches_downloader_without_local_inspection(self):
         with patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "command", AsyncMock(return_value=b'{"entries": []}')):
             candidates = await trailers.TrailerService().candidates("GigaBash", {"official_match": True, "owners": ["Passion Republic Games"]})

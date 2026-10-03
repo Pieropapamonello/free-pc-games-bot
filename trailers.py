@@ -9,15 +9,22 @@ import sys
 import tempfile
 import time
 import weakref
+import ipaddress
+import socket
+from urllib.parse import urljoin, urlparse
 from pathlib import Path
 
 import aiohttp
+from bs4 import BeautifulSoup
+from langdetect import DetectorFactory, detect_langs
+from langdetect.lang_detect_exception import LangDetectException
 from nello_downloader import download_youtube, NelloExtractionError, configured as nello_configured
 
 log = logging.getLogger(__name__)
 MAX_SECONDS = 180
 MAX_DOWNLOAD = 100_000_000
 MAX_UPLOAD = 45_000_000
+DetectorFactory.seed = 0
 # Publisher's launch announcement links this exact base-game trailer:
 # https://www.gamespress.com/fr/GigaBash-Kaijus-vs-Heroes-Arena-Brawler-is-out-now-on-PC-PlayStation
 PUBLISHER_TRAILERS = {"gigabash": ("kJUeC8NqQqo", "Passion Republic Games")}
@@ -65,7 +72,7 @@ def title_matches(name, title):
     return False
 
 
-def official_youtube(info, title, owners):
+def official_youtube(info, title, owners, *, require_language=True):
     name = str(info.get("title") or "")
     channel = identity(info.get("channel"))
     return bool(
@@ -76,7 +83,7 @@ def official_youtube(info, title, owners):
         and not re.search(r"fan.?made|reaction|concept|walkthrough", name, re.I)
         and not info.get("is_live")
         and valid_duration(info.get("duration"))
-        and language_of(info) in ("it", "en")
+        and (not require_language or language_of(info) in ("it", "en"))
     )
 
 
@@ -98,6 +105,62 @@ async def command(*args, timeout=90):
 async def probe(path):
     return json.loads(await command("ffprobe", "-v", "error", "-show_format",
                                     "-show_streams", "-of", "json", path, timeout=20))
+
+
+def text_language(text):
+    text = " ".join(re.findall(r"[A-Za-zÀ-ÿ]+", text))
+    if len(text) < 50 or len(text.split()) < 8:
+        return None
+    try:
+        languages = detect_langs(text)
+        best = languages[0]
+        return best.lang if best.lang in ("it", "en") and best.prob >= 0.90 else None
+    except LangDetectException:
+        return None
+
+
+async def visual_language(source, duration, directory, index):
+    """Recognize visible trailer text; never infer language from store locale."""
+    texts = []
+    try:
+        for sample, fraction in enumerate((0.10, 0.30, 0.50, 0.70, 0.90)):
+            frame = Path(directory) / f"language-{index}-{sample}.png"
+            await command("ffmpeg", "-v", "error", "-y", "-ss", str(duration * fraction),
+                          "-i", source, "-frames:v", "1", "-vf", "scale=-2:720", frame, timeout=10)
+            recognized = await command("tesseract", frame, "stdout", "-l", "eng+ita", "--psm", "11", timeout=10)
+            text = " ".join(recognized.decode(errors="replace").split())
+            if text not in texts:
+                texts.append(text)
+        return text_language(" ".join(texts))
+    except Exception as exc:
+        log.info("Verifica lingua visiva non disponibile: %s", type(exc).__name__)
+        return None
+
+
+async def public_https(url):
+    parsed = urlparse(url)
+    try:
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
+            return False
+        addresses = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, 443, type=socket.SOCK_STREAM)
+        return bool(addresses) and all(ipaddress.ip_address(address[4][0]).is_global for address in addresses)
+    except (OSError, ValueError):
+        return False
+
+
+def page_trailers(html, page):
+    soup = BeautifulSoup(html, "html.parser")
+    result = []
+    for element in soup.select("video[src], video source[src], a[href]"):
+        url = urljoin(page, element.get("src") or element.get("href") or "")
+        if not re.search(r"\.(mp4|webm)$", urlparse(url).path, re.I):
+            continue
+        context = " ".join((element.get("title", ""), element.get("aria-label", ""), element.get_text(" ", strip=True), urlparse(url).path))
+        if not re.search(r"\btrailer\b", re.sub(r"[_-]", " ", context), re.I):
+            continue
+        if url not in [item["url"] for item in result]:
+            result.append({"url": url, "language": language_of({"title": context}), "kind": "publisher"})
+    return result[:4]
 
 
 def media_duration(info):
@@ -157,11 +220,12 @@ class TrailerService:
         self.gameplay_cache[title] = (time.monotonic() + (21600 if fallback else 600), fallback)
         return fallback
 
-    async def candidates(self, title, steam):
+    async def candidates(self, title, steam, *, youtube=True):
         candidates = []
         # Exact Steam identity only: its movies are uploaded by the publisher.
         if steam and steam.get("official_match"):
-            for movie in steam.get("movies", []):
+            movies = sorted(steam.get("movies", []), key=lambda m: (language_of(m) != "it", "launch" not in m.get("name", "").lower(), "gameplay" not in m.get("name", "").lower()))
+            for movie in movies:
                 if not re.search(r"\btrailer\b", movie.get("name", ""), re.I):
                     continue
                 url = (movie.get("mp4") or {}).get("480") or (movie.get("mp4") or {}).get("max")
@@ -172,6 +236,25 @@ class TrailerService:
                 if url:
                     candidates.append({"url": "https:" + url if url.startswith("//") else url,
                                        "language": language_of(movie), "kind": kind})
+        for page in (steam or {}).get("official_pages", [])[:3]:
+            if not await public_https(page):
+                continue
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    async with session.get(page, allow_redirects=False) as response:
+                        response.raise_for_status()
+                        if response.status != 200:
+                            continue
+                        raw = await response.content.read(2_000_001)
+                        if len(raw) > 2_000_000:
+                            continue
+                for candidate in page_trailers(raw.decode(errors="replace"), page):
+                    if await public_https(candidate["url"]):
+                        candidates.append(candidate)
+            except Exception as exc:
+                log.info("Video editore non disponibile: %s", type(exc).__name__)
+        if not youtube:
+            return candidates
         owners = (steam or {}).get("owners", []) if (steam or {}).get("official_match") else []
         linked = PUBLISHER_TRAILERS.get(identity(title))
         if linked and nello_configured() and identity(linked[1]) in {identity(owner) for owner in owners}:
@@ -235,7 +318,7 @@ class TrailerService:
                         checked = {"title": metadata.get("title"), "channel": metadata.get("uploader"),
                                    "channel_is_verified": True, "duration": metadata.get("duration"),
                                    "language": (metadata.get("source_info") or {}).get("language")}
-                        if metadata.get("id") != candidate["video_id"] or not official_youtube(checked, candidate["game_title"], candidate["owners"]):
+                        if metadata.get("id") != candidate["video_id"] or not official_youtube(checked, candidate["game_title"], candidate["owners"], require_language=False):
                             raise ValueError("Metadati Nello non confermano il trailer ufficiale")
                         candidate = dict(candidate, language=language_of(checked), duration=metadata["duration"])
                         expected_duration = metadata["duration"]
@@ -269,8 +352,10 @@ class TrailerService:
                           "-i", candidate["url"], "-map", "0:v:0", "-map", "0:a:0?",
                           "-c", "copy", "-fs", str(MAX_DOWNLOAD + 1), source, timeout=120)
         elif candidate["kind"] != "nello":
-            async with session.get(candidate["url"], timeout=aiohttp.ClientTimeout(total=90)) as response:
+            async with session.get(candidate["url"], timeout=aiohttp.ClientTimeout(total=90), allow_redirects=False) as response:
                 response.raise_for_status()
+                if response.status != 200:
+                    return None
                 if response.content_length and response.content_length > MAX_DOWNLOAD:
                     return None
                 size = 0
@@ -298,6 +383,13 @@ class TrailerService:
         if language and any(tag and tag != language for tag in tags):
             return None
         language = language or (tags[0] if tags and len(set(tags)) == 1 else None)
+        if language is None:
+            try:
+                language = await asyncio.wait_for(visual_language(source, duration, directory, index), timeout=40)
+            except asyncio.TimeoutError:
+                log.info("Verifica lingua visiva: tempo massimo raggiunto")
+            if language:
+                log.info("Lingua trailer verificata dal testo nel video: %s (%s)", language, candidate["kind"])
         if language not in ("it", "en"):
             log.info("Trailer scartato: lingua italiana/inglese non verificabile (%s)", candidate["kind"])
             return None
@@ -342,20 +434,27 @@ class TrailerService:
                     return True
             if len(self.cache) >= 128:
                 self.cache.pop(next(iter(self.cache)))
-            candidates = await self.candidates(title, steam)
+            candidates = await self.candidates(title, steam, youtube=False)
             log.info("Trailer %s: candidati=%s, identita_store=%s, downloader_configurato=%s",
                      title, len(candidates), bool(steam and steam.get("official_match")), nello_configured())
             # Prepare all unlabelled Steam videos before choosing English: tags
             # inside the file may identify an Italian trailer.
             with tempfile.TemporaryDirectory(prefix="official-trailer-") as directory:
                 prepared = []
-                for index, candidate in enumerate(sorted(candidates, key=lambda c: (c.get("language") != "it", c.get("kind") != "youtube"))[:8]):
-                    try:
-                        trailer = await self.prepare(candidate, session, directory, index)
-                        if trailer:
-                            prepared.append(trailer)
-                    except Exception as exc:
-                        log.info("Trailer scartato per %s: %s", title, exc)
+                for phase in range(2):
+                    if phase:
+                        if prepared:
+                            break
+                        candidates = [c for c in await self.candidates(title, steam) if c.get("kind") == "youtube"]
+                    for index, candidate in enumerate(sorted(candidates, key=lambda c: c.get("language") != "it")[:6]):
+                        try:
+                            trailer = await self.prepare(candidate, session, directory, phase * 10 + index)
+                            if trailer:
+                                prepared.append(trailer)
+                                log.info("Trailer pronto per %s: fonte=%s, lingua=%s", title, candidate.get("kind"), trailer["language"])
+                                break
+                        except Exception as exc:
+                            log.info("Trailer scartato per %s: %s", title, exc)
                 delivery_error = None
                 for trailer in sorted(prepared, key=lambda t: t["language"] != "it"):
                     form = aiohttp.FormData()
