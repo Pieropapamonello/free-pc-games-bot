@@ -14,7 +14,7 @@ Deploy webhook su Render.
   Gli elenchi sono ordinati per store (con intestazioni) e poi per scadenza
   crescente; le scadenze sconosciute sono in fondo allo store. Le date mostrate
   omettono l'anno, conservato per ordinamento e verifica delle offerte scadute.
-  I giochi Prime riportano "Amazon Prime" invece del generico "Abbonamento".
+  Amazon Prime compare nell'intestazione dello store senza ripetersi nelle righe.
   In formato elenco le richieste manuali mostrano tutti i risultati;
   nelle schede singole restano i limiti di 12 giochi e 8 risultati di ricerca.
 - `/start` iscrive la chat, apre il menu piattaforme e mostra fino a 12 giochi
@@ -121,7 +121,7 @@ nella pagina dello store.
 
 I giochi free-to-play permanenti sono esclusi da liste, ricerche e avvisi.
 Le promozioni con una data di fine gia' passata sono escluse. Quando la fonte
-non comunica una data, la scheda e l'elenco indicano "Scadenza non comunicata".
+non comunica una data, la scadenza viene omessa dalla scheda e dall'elenco.
 I nomi ricavati dagli URL Prime Gaming vengono capitalizzati per la lettura.
 Il catalogo FreeToGame non viene piu' consultato. Restano le promozioni gratuite
 di giochi normalmente a pagamento e i giveaway di DLC/contenuti, se abilitati.

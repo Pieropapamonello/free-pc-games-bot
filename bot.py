@@ -1297,8 +1297,6 @@ def format_game(g: dict) -> str:
     date = format_date_it(g.get("end_date"))
     if date:
         parts.append("⏳ <b>Scade:</b> " + html_escape(date))
-    else:
-        parts.append("⏳ Scadenza non comunicata")
     if g.get("url"):
         parts.append("📥 <b>Scarica da:</b> " + text_link(g["url"], source))
     # Attribuzione richiesta dalle API, mantenuta compatta e cliccabile.
@@ -1611,7 +1609,7 @@ def delivery_units(chat_id: int, games: list[dict]):
             note = ""
             if game.get("content_type") == "subscription" or any(
                     source in game.get("source", "").lower() for source in ("prime", "amazon")):
-                note = " · 💳 Amazon Prime" if game_store(game) == "Amazon Prime" else " · 💳 Abbonamento"
+                note = "" if game_store(game) == "Amazon Prime" else " · 💳 Abbonamento"
             elif game.get("content_type") == "dlc":
                 note = " · 🎁 DLC / contenuti"
             elif game.get("access_model") == "free_to_play":
@@ -1619,8 +1617,6 @@ def delivery_units(chat_id: int, games: list[dict]):
             date = format_date_it(game.get("end_date"))
             if date:
                 note += " · ⏳ " + html_escape(date[:100])
-            else:
-                note += " · ⏳ Scadenza non comunicata"
             line = f"• {link}{note}\n"
             store = game_store(game)
             store_heading = f"\n🛒 <b>{html_escape(store)}</b>\n" if store != previous_store else ""

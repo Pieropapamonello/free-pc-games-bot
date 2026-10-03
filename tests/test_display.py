@@ -92,7 +92,9 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         units = bot.delivery_units(101, games)
         self.assertEqual([g["id"] for g in units[0][0]], ["prime", "gog", "early", "late", "unknown"])
         text = units[0][1]
-        self.assertIn("💳 Amazon Prime", text)
+        self.assertIn("<b>Amazon Prime</b>", text)
+        self.assertNotIn("💳 Amazon Prime", text)
+        self.assertNotIn("Scadenza non comunicata", text)
         self.assertNotIn("Abbonamento", text)
         self.assertNotIn("2026", text)
         self.assertIn("5 Ottobre", text)
