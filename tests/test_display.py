@@ -80,3 +80,26 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
                 "message": {"chat": {"id": 101}, "message_id": 5}}})
             await asyncio.sleep(0)
         save.assert_awaited_once_with(101, 5, "digest")
+
+    async def test_digest_orders_by_store_then_deadline_without_year(self):
+        bot.state.set_display(101, "digest")
+        games = [dict(self.games[0], id="late", title="Later (Steam)", end_date="2026-10-09"),
+                 dict(self.games[0], id="unknown", title="Unknown (Steam)", end_date="N/A"),
+                 dict(self.games[0], id="early", title="Earlier (Steam)", end_date="2026-10-05"),
+                 dict(self.games[0], id="gog", title="GOG game", end_date="2026-10-08"),
+                 dict(self.games[0], id="prime", title="Prime game", source="Amazon Prime Gaming",
+                      content_type="subscription")]
+        units = bot.delivery_units(101, games)
+        self.assertEqual([g["id"] for g in units[0][0]], ["prime", "gog", "early", "late", "unknown"])
+        text = units[0][1]
+        self.assertIn("💳 Amazon Prime", text)
+        self.assertNotIn("Abbonamento", text)
+        self.assertNotIn("2026", text)
+        self.assertIn("5 Ottobre", text)
+        self.assertIn("<b>Steam</b>", text)
+
+    def test_deadline_order_retains_year_internally(self):
+        older = dict(self.games[0], title="Same (Steam)", end_date="2026-12-31")
+        newer = dict(older, end_date="2027-01-01")
+        self.assertLess(bot.game_sort_key(older), bot.game_sort_key(newer))
+        self.assertEqual(bot.format_date_it("2026-10-05T12:00:00Z"), "5 Ottobre")

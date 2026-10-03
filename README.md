@@ -11,6 +11,10 @@ Deploy webhook su Render.
   scadenze e condizioni DLC/abbonamento, senza immagini o video.
   I dispositivi condivisi hanno un'intestazione combinata per evitare duplicati.
   Gli elenchi lunghi vengono divisi in messaggi entro i limiti di Telegram.
+  Gli elenchi sono ordinati per store (con intestazioni) e poi per scadenza
+  crescente; le scadenze sconosciute sono in fondo allo store. Le date mostrate
+  omettono l'anno, conservato per ordinamento e verifica delle offerte scadute.
+  I giochi Prime riportano "Amazon Prime" invece del generico "Abbonamento".
   In formato elenco le richieste manuali mostrano tutti i risultati;
   nelle schede singole restano i limiti di 12 giochi e 8 risultati di ricerca.
 - `/start` iscrive la chat, apre il menu piattaforme e mostra fino a 12 giochi

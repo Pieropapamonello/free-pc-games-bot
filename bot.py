@@ -289,10 +289,14 @@ def format_date_it(s) -> Optional[str]:
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M UTC", "%d/%m/%Y"):
         try:
             dt = datetime.strptime(str(s), fmt)
-            return f"{dt.day} {MESI_IT[dt.month - 1]} {dt.year}"
+            return f"{dt.day} {MESI_IT[dt.month - 1]}"
         except ValueError:
             continue
-    return str(s)
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return f"{dt.day} {MESI_IT[dt.month - 1]}"
+    except ValueError:
+        return re.sub(r"\b(?:19|20)\d{2}\b", "", str(s)).strip()
 
 
 def clean_title(t: str) -> str:
@@ -1174,25 +1178,30 @@ async def fetch_all_games() -> list[dict]:
     return unique
 
 
-def is_expired_promotion(game: dict) -> bool:
+def promotion_deadline(game: dict) -> Optional[datetime]:
     value = str(game.get("end_date") or "").strip()
     if not value or value.upper() in ("N/A", "N/D", "NONE"):
-        return False
+        return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M UTC", "%d/%m/%Y"):
         try:
             end = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
             if fmt in ("%Y-%m-%d", "%d/%m/%Y"):
                 end = end.replace(hour=23, minute=59, second=59)
-            return end < datetime.now(timezone.utc)
+            return end
         except ValueError:
             continue
     try:
         end = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
-        return end < datetime.now(timezone.utc)
+        return end
     except ValueError:
-        return False
+        return None
+
+
+def is_expired_promotion(game: dict) -> bool:
+    end = promotion_deadline(game)
+    return end is not None and end < datetime.now(timezone.utc)
 
 
 def is_permanent_free_to_play(game: dict) -> bool:
@@ -1559,9 +1568,29 @@ def display_keyboard(current: str) -> dict:
                                 for mode, label in DISPLAY_MODES.items()]}
 
 
+def game_store(game: dict) -> str:
+    source = game.get("source", "")
+    if any(word in source.casefold() for word in ("prime", "amazon")):
+        return "Amazon Prime"
+    metadata = " ".join(str(game.get(field) or "") for field in ("store", "platform", "title", "source", "url"))
+    for label, pattern in (("Epic Games", r"\bepic\b"), ("Steam", r"\bsteam\b|steampowered"),
+                           ("GOG", r"\bgog\b"), ("IndieGala", r"\bindiegala\b"),
+                           ("itch.io", r"\bitch[ .]io\b|\bitchio\b"), ("Stove", r"\bstove\b"),
+                           ("Ubisoft", r"\bubisoft\b"), ("Meta Quest", r"\boculus\b|\brift\b|\bmeta quest\b")):
+        if re.search(pattern, metadata, re.I):
+            return label
+    return source or "Altri store"
+
+
+def game_sort_key(game: dict):
+    end = promotion_deadline(game)
+    return (game_store(game).casefold(), end.timestamp() if end else float("inf"),
+            clean_title(game["title"]).casefold())
+
+
 def delivery_units(chat_id: int, games: list[dict]):
     if state.get_display(chat_id) == "cards":
-        return [([g], None) for g in games]
+        return [([g], None) for g in sorted(games, key=game_sort_key)]
     groups = {}
     wanted = state.get_prefs(chat_id)
     labels = {"pc": "💻 PC", "console": "🎮 Console", "android": "📱 Android / iOS"}
@@ -1574,15 +1603,15 @@ def delivery_units(chat_id: int, games: list[dict]):
     units = []
     for device, group in groups.items():
         header = f"🎁 <b>GIOCHI GRATIS · {html_escape(device)}</b>\n\n"
-        text, batch = header, []
-        for game in group:
+        text, batch, previous_store = header, [], None
+        for game in sorted(group, key=game_sort_key):
             title = clean_title(game["title"])[:180]
             url = game.get("url") or game.get("source_url") or ""
             link = text_link(url, title) if urlparse(url).scheme in ("https", "http") and len(url) <= 1500 else html_escape(title)
             note = ""
             if game.get("content_type") == "subscription" or any(
                     source in game.get("source", "").lower() for source in ("prime", "amazon")):
-                note = " · 💳 Abbonamento"
+                note = " · 💳 Amazon Prime" if game_store(game) == "Amazon Prime" else " · 💳 Abbonamento"
             elif game.get("content_type") == "dlc":
                 note = " · 🎁 DLC / contenuti"
             elif game.get("access_model") == "free_to_play":
@@ -1593,11 +1622,15 @@ def delivery_units(chat_id: int, games: list[dict]):
             else:
                 note += " · ⏳ Scadenza non comunicata"
             line = f"• {link}{note}\n"
-            if len(text) + len(line) > 3900 and batch:
+            store = game_store(game)
+            store_heading = f"\n🛒 <b>{html_escape(store)}</b>\n" if store != previous_store else ""
+            if len(text) + len(store_heading) + len(line) > 3900 and batch:
                 units.append((batch, text))
                 text, batch = header, []
-            text += line
+                store_heading = f"🛒 <b>{html_escape(store)}</b>\n"
+            text += store_heading + line
             batch.append(game)
+            previous_store = store
         if batch:
             units.append((batch, text))
     return units
