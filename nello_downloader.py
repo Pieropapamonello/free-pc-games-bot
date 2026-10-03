@@ -7,6 +7,10 @@ from urllib.parse import urlparse
 import aiohttp
 
 
+class NelloExtractionError(RuntimeError):
+    """Only fixed, non-sensitive service outcome codes are exposed in logs."""
+
+
 def configured():
     return bool((os.getenv("NELLO_YOUTUBE_URL") and os.getenv("NELLO_YOUTUBE_TOKEN"))
                 or (os.getenv("DOWNLOADER_URL") and os.getenv("DOWNLOADER_TOKEN")))
@@ -23,7 +27,10 @@ async def download_space(session, base, token, url, destination, max_bytes):
                 response.raise_for_status()
                 result = await response.json()
             if not result.get("success"):
-                raise RuntimeError("Nello non ha estratto il trailer")
+                reason = result.get("auth_issue")
+                if reason not in ("access_check", "download_failed"):
+                    reason = "duration_limit" if result.get("skip_long") else "extraction_failed"
+                raise NelloExtractionError(reason)
             ident = str(uuid.UUID(result["artifact"]))
             size = 0
             async with session.get(base + "/api/media/" + ident, headers=headers,

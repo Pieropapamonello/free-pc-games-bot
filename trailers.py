@@ -12,7 +12,7 @@ import weakref
 from pathlib import Path
 
 import aiohttp
-from nello_downloader import download_youtube, configured as nello_configured
+from nello_downloader import download_youtube, NelloExtractionError, configured as nello_configured
 
 log = logging.getLogger(__name__)
 MAX_SECONDS = 180
@@ -49,11 +49,12 @@ def identity(text):
 
 
 def title_matches(name, title):
+    name = re.sub(r"\s*\|\s*(?:gamescom\s+\d{4}|state of play)\s*$", "", name, flags=re.I)
     words = re.findall(r"\w+", name.casefold())
     wanted = re.findall(r"\w+", title.casefold())
     marketing = set("official trailer launch reveal announcement gameplay cinematic story teaser "
                     "english inglese eng italian italiano ita hd 4k 1080p 60fps "
-                    "pc ps4 ps5 xbox one series xs nintendo switch steam epic games store".split())
+                    "pc ps4 ps5 playstation xbox one series xs nintendo switch steam epic games store".split())
     if not wanted:
         return False
     for index in range(len(words) - len(wanted) + 1):
@@ -241,8 +242,9 @@ class TrailerService:
                     candidate = dict(candidate, kind="nello")
                 except Exception as exc:
                     source.unlink(missing_ok=True)
-                    log.info("Downloader Nello non disponibile per %s: errore=%s, HTTP=%s",
-                             candidate.get("game_title", "trailer"), type(exc).__name__, getattr(exc, "status", None))
+                    log.info("Downloader Nello non disponibile per %s: errore=%s, HTTP=%s, motivo=%s",
+                             candidate.get("game_title", "trailer"), type(exc).__name__, getattr(exc, "status", None),
+                             str(exc) if isinstance(exc, NelloExtractionError) else "non_specificato")
                     if candidate.get("metadata_pending"):
                         return None
         if candidate["kind"] == "youtube":

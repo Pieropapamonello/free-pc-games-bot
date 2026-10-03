@@ -3,10 +3,18 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-from nello_downloader import download_youtube
+from nello_downloader import download_youtube, NelloExtractionError
 
 
 class NelloTests(unittest.IsolatedAsyncioTestCase):
+    async def test_space_failure_exposes_fixed_reason_without_raw_error(self):
+        session = MagicMock()
+        response = session.post.return_value.__aenter__.return_value
+        response.json = AsyncMock(return_value={"success": False, "auth_issue": "access_check", "error": "private server details"})
+        with patch.dict(os.environ, {"NELLO_YOUTUBE_URL": "https://example.hf.space", "NELLO_YOUTUBE_TOKEN": "test-only"}):
+            with self.assertRaisesRegex(NelloExtractionError, "^access_check$"):
+                await download_youtube(session, "https://youtu.be/abcdefghijk", Path("unused.mp4"), 1000)
+        session.get.assert_not_called()
     async def test_space_download_and_cleanup_even_when_too_large(self):
         for limit in (1000, 2):
             session = MagicMock()
