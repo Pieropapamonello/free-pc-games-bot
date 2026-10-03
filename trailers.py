@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 MAX_SECONDS = 180
 MAX_DOWNLOAD = 100_000_000
 MAX_UPLOAD = 45_000_000
+# Publisher's launch announcement links this exact base-game trailer:
+# https://www.gamespress.com/fr/GigaBash-Kaijus-vs-Heroes-Arena-Brawler-is-out-now-on-PC-PlayStation
+PUBLISHER_TRAILERS = {"gigabash": ("kJUeC8NqQqo", "Passion Republic Games")}
 
 
 def language_of(metadata):
@@ -169,22 +172,27 @@ class TrailerService:
                     candidates.append({"url": "https:" + url if url.startswith("//") else url,
                                        "language": language_of(movie), "kind": kind})
         owners = (steam or {}).get("owners", []) if (steam or {}).get("official_match") else []
+        linked = PUBLISHER_TRAILERS.get(identity(title))
+        if linked and nello_configured() and identity(linked[1]) in {identity(owner) for owner in owners}:
+            candidates.append({"url": "https://www.youtube.com/watch?v=" + linked[0],
+                               "language": None, "kind": "youtube", "metadata_pending": True,
+                               "video_id": linked[0], "game_title": title, "owners": [linked[1]]})
         if owners:
             # Inspect a bounded number of results; no arbitrary first-result fallback.
-            seen = set()
-            for language in ("italiano", "english"):
+            seen = {linked[0]} if linked else set()
+            for language in ("italiano", ""):
                 try:
                     results = json.loads(await command(
                         sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
                         "--js-runtimes", "node", "--flat-playlist", "--dump-single-json", "--socket-timeout", "10",
-                        f"ytsearch8:{title} official launch trailer {language} -DLC -expansion", timeout=45))
+                        f'ytsearch8:"{title}" "official launch trailer" {language}', timeout=45))
                     for entry in results.get("entries") or []:
                         video_id = entry.get("id", "")
                         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) or video_id in seen:
                             continue
                         seen.add(video_id)
                         if not title_matches(entry.get("title", ""), title):
-                            log.info("Trailer YouTube scartato per %s: titolo non corrispondente al gioco base", title)
+                            log.info("Trailer YouTube scartato per %s: titolo=%s", title, entry.get("title", ""))
                             continue
                         # Skip channels already known not to belong to the game owners.
                         if identity(entry.get("channel")) not in {identity(o) for o in owners}:

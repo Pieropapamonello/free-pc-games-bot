@@ -73,6 +73,13 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publisher_linked_trailer_reaches_downloader_without_local_inspection(self):
+        with patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "command", AsyncMock(return_value=b'{"entries": []}')):
+            candidates = await trailers.TrailerService().candidates("GigaBash", {"official_match": True, "owners": ["Passion Republic Games"]})
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["video_id"], "kJUeC8NqQqo")
+        self.assertTrue(candidates[0]["metadata_pending"])
+
     async def test_blocked_local_metadata_routes_verified_search_to_nello(self):
         import json
         entry = {"id": "abcdefghijk", "title": "Example Official Trailer", "channel": "Publisher", "channel_is_verified": True}
