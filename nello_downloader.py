@@ -18,11 +18,17 @@ def configured():
 
 async def download_space(session, base, token, url, destination, max_bytes):
     headers = {"x-nello-token": token}
+    payload = {"url": url, "kind": "video", "max_duration": 180}
+    cookies = os.getenv("NELLO_YOUTUBE_COOKIES", "")
+    if cookies:
+        if len(cookies.encode("utf-8")) > 512 * 1024 or not cookies.startswith(("# Netscape HTTP Cookie File", "# HTTP Cookie File")):
+            raise ValueError("Cookie YouTube: formato Netscape richiesto, massimo 512 KiB")
+        payload["cookies"] = cookies.replace("\r\n", "\n")
     ident = None
     try:
         async with asyncio.timeout(150):
             async with session.post(base + "/api/youtube", headers=headers,
-                    json={"url": url, "kind": "video", "max_duration": 180},
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=120), allow_redirects=False) as response:
                 response.raise_for_status()
                 result = await response.json()

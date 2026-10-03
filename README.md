@@ -51,6 +51,12 @@ e `NELLO_YOUTUBE_TOKEN` allo stesso valore del secret `NELLO_TOKEN` dello Space.
 Usa `/api/youtube` e scarica `/api/media/{artifact}`, eliminando il file remoto
 anche in caso di download fallito. `/api/healthz` permette il controllo pubblico.
 Il token va inserito solo nelle variabili segrete, mai in chat o nel repository.
+Se lo Space restituisce `access_check`, YouTube sta bloccando anche il suo
+downloader. Il bot supporta il secret Render `NELLO_YOUTUBE_COOKIES`: contenuto
+di un file cookie YouTube in formato Netscape (massimo 512 KiB), inoltrato solo
+al downloader configurato tramite HTTPS, senza stamparlo nei log. Non inserirlo
+in chat o nel repository. I cookie possono scadere e non garantiscono lo sblocco
+di un IP del provider; verificarli prima direttamente nello Space.
 
 Resta supportato il protocollo `/jobs` del progetto
 [Nello](https://github.com/Pieropapamonello/Nello). Per attivarlo impostare

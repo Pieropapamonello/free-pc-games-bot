@@ -49,7 +49,7 @@ def identity(text):
 
 
 def title_matches(name, title):
-    name = re.sub(r"\s*\|\s*(?:gamescom\s+\d{4}|state of play)\s*$", "", name, flags=re.I)
+    name = re.sub(r"\s*[|@]\s*(?:gamescom\s+\d{4}|state of play)\s*$", "", name, flags=re.I)
     words = re.findall(r"\w+", name.casefold())
     wanted = re.findall(r"\w+", title.casefold())
     marketing = set("official trailer launch reveal announcement gameplay cinematic story teaser "

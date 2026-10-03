@@ -7,6 +7,15 @@ from nello_downloader import download_youtube, NelloExtractionError
 
 
 class NelloTests(unittest.IsolatedAsyncioTestCase):
+    async def test_space_forwards_optional_netscape_cookies(self):
+        session = MagicMock()
+        response = session.post.return_value.__aenter__.return_value
+        response.json = AsyncMock(return_value={"success": False, "auth_issue": "access_check"})
+        fake = "# Netscape HTTP Cookie File\r\n# test-only\r\n"
+        with patch.dict(os.environ, {"NELLO_YOUTUBE_URL": "https://example.hf.space", "NELLO_YOUTUBE_TOKEN": "test-only", "NELLO_YOUTUBE_COOKIES": fake}):
+            with self.assertRaises(NelloExtractionError):
+                await download_youtube(session, "https://youtu.be/abcdefghijk", Path("unused.mp4"), 1000)
+        self.assertEqual(session.post.call_args.kwargs["json"]["cookies"], fake.replace("\r\n", "\n"))
     async def test_space_failure_exposes_fixed_reason_without_raw_error(self):
         session = MagicMock()
         response = session.post.return_value.__aenter__.return_value
