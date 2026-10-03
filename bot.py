@@ -1213,6 +1213,27 @@ def parse_itch_promotions(html: str) -> list[dict]:
     return games
 
 
+def parse_itch_description(html: str, title: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.select_one(".formatted_description")
+    if not body:
+        return ""
+    for unwanted in body.select("script, style, iframe, table"):
+        unwanted.decompose()
+    paragraphs = []
+    for element in body.select("p, li"):
+        text = " ".join(element.get_text(" ", strip=True).split())
+        if len(text) < 40 or normalize_title(text) == normalize_title(title):
+            continue
+        if re.match(r"^(controls?|system requirements?|download|installation|how to install|wasd)\b", text, re.I):
+            continue
+        paragraphs.append(text)
+    return " ".join(paragraphs)[:1500]
+
+
+_itch_description_cache = {}
+
+
 async def fetch_itch_promotions() -> list[dict]:
     games, seen = [], set()
     try:
@@ -1237,6 +1258,25 @@ async def fetch_itch_promotions() -> list[dict]:
             deadlines[url] = date
         for game in games:
             game["end_date"] = deadlines.get(game.pop("sale_url"), "N/A")
+        async def enrich(game):
+            cached = _itch_description_cache.get(game["url"])
+            if cached and time.time() - cached[0] < 21600:
+                description = cached[1]
+            else:
+                async with semaphore:
+                    try:
+                        async with asyncio.timeout(12):
+                            description = parse_itch_description(await fetch_html(game["url"]), game["title"])
+                        if description:
+                            if len(_itch_description_cache) >= 512:
+                                _itch_description_cache.pop(next(iter(_itch_description_cache)))
+                            _itch_description_cache[game["url"]] = (time.time(), description)
+                    except Exception as exc:
+                        log.info("Descrizione itch non disponibile: %s", type(exc).__name__)
+                        description = ""
+            if len(description) > len(game.get("description", "")):
+                game["description"] = description
+        await asyncio.gather(*(enrich(game) for game in games))
     except Exception as exc:
         log.warning("itch.io non disponibile: %s", type(exc).__name__)
     return games

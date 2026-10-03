@@ -8,6 +8,21 @@ bot = test_start.bot
 class ExtraSourceTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_start.StartRoutingTests.asyncSetUp
 
+    def test_itch_description_reads_game_story_not_page_controls(self):
+        story = "Explore an abandoned house and uncover its secrets while escaping the creature inside."
+        html = '<div class="formatted_description"><h2>Eternal Night</h2><p>Night eternal</p><p>' + story + '</p><p>Controls: WASD to move and mouse to look around the room.</p><script>unwanted code</script></div><p>Unrelated user comment.</p>'
+        self.assertEqual(bot.parse_itch_description(html, "Eternal Night"), story)
+        self.assertEqual(bot.parse_itch_description('<p>No description container.</p>', "Example"), "")
+
+    async def test_itch_fetch_enriches_short_catalog_description(self):
+        game = {"id": "itch_test", "title": "Example", "url": "https://author.itch.io/example", "description": "Example", "sale_url": ""}
+        story = "Explore an abandoned house and uncover its secrets while escaping the creature inside."
+        bot._itch_description_cache.clear()
+        with patch.object(bot, "parse_itch_promotions", side_effect=[[game], [], []]), patch.object(bot, "fetch_html", AsyncMock(side_effect=['catalog', 'catalog', 'catalog', '<div class="formatted_description"><p>' + story + '</p></div>'])):
+            games = await bot.fetch_itch_promotions()
+        self.assertEqual(games[0]["description"], story)
+        bot._itch_description_cache.clear()
+
     def test_itch_accepts_only_zero_price_100_percent_games_with_devices(self):
         def cell(name, discount, price):
             return f'''<div class="game_cell" data-game_id="42">
