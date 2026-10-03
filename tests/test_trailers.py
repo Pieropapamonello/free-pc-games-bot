@@ -10,6 +10,13 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_reviewed_language_is_bound_to_exact_asset_and_duration(self):
+        path = next(iter(trailers.REVIEWED_STEAM_ASSETS))
+        url = "https://video.akamai.steamstatic.com" + path
+        self.assertEqual(trailers.reviewed_steam_language(url + "?t=123", 79), "en")
+        self.assertIsNone(trailers.reviewed_steam_language(url.replace("1750699784", "9999999999"), 79))
+        self.assertIsNone(trailers.reviewed_steam_language(url.replace("video.akamai.steamstatic.com", "other.example"), 79))
+        self.assertIsNone(trailers.reviewed_steam_language(url, 120))
     def test_visible_text_language_requires_substantial_language_evidence(self):
         self.assertEqual(trailers.text_language("Explore the city and discover a world of monsters. Play with your friends and fight to save the world."), "en")
         self.assertEqual(trailers.text_language("Esplora la città e scopri un mondo pieno di mostri. Gioca con i tuoi amici e combatti per salvare il mondo."), "it")
@@ -85,6 +92,16 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reviewed_steam_asset_is_prepared_without_ocr(self):
+        details = {"format": {"duration": "79"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio", "tags": {"language": "und"}}]}
+        async def download_or_convert(*args, **kwargs):
+            Path(args[-1]).write_bytes(b"video")
+            return b""
+        candidate = {"kind": "steam_stream", "language": None, "url": "https://video.akamai.steamstatic.com" + next(iter(trailers.REVIEWED_STEAM_ASSETS))}
+        with tempfile.TemporaryDirectory() as folder, patch.object(trailers, "probe", AsyncMock(return_value=details)), patch.object(trailers, "command", download_or_convert), patch.object(trailers, "visual_language", AsyncMock()) as visual:
+            result = await trailers.TrailerService().prepare(candidate, None, folder, 0)
+        self.assertEqual(result["language"], "en")
+        visual.assert_not_awaited()
     async def test_visual_language_samples_final_card_with_readable_small_text(self):
         calls = []
         async def recognize(*args, **kwargs):

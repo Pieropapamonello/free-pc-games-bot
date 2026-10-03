@@ -55,6 +55,14 @@ visibile deve fornire almeno otto parole e 50 caratteri, con riconoscimento
 linguistico italiano/inglese di confidenza >=90%. Questa e' una verifica del
 testo visibile, non del parlato. Se non basta, il trailer viene scartato e resta
 il banner. Il Dockerfile include Tesseract con i dati inglesi e italiani.
+L'OCR usa un solo thread e un budget totale di 90 secondi, con 40 secondi per
+estrazione/lettura di un fotogramma; i log distinguono le due fasi. La conversione
+usa il preset ultrafast per ridurre il carico sui servizi Render con poca CPU.
+Il trailer Steam di lancio di GigaBash e' stato controllato direttamente: le
+scritte finali sono inglesi e dura 79 secondi. Questa revisione e' associata
+all'esatto percorso/versione del video e alla durata, non al solo titolo del
+gioco: consente di usarlo senza ripetere l'OCR. Una nuova versione del file
+richiede nuovamente una verifica; i controlli di durata e formato restano attivi.
 
 Il client `nello_downloader.py` supporta lo Space YouTube di Nello:
 su Render impostare `NELLO_YOUTUBE_URL=https://bicimonello-nello-youtube.hf.space`

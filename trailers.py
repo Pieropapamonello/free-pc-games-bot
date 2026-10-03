@@ -28,6 +28,20 @@ DetectorFactory.seed = 0
 # Publisher's launch announcement links this exact base-game trailer:
 # https://www.gamespress.com/fr/GigaBash-Kaijus-vs-Heroes-Arena-Brawler-is-out-now-on-PC-PlayStation
 PUBLISHER_TRAILERS = {"gigabash": ("kJUeC8NqQqo", "Passion Republic Games")}
+# Reviewed actual Steam launch asset: English end card, 79 seconds. Bind the
+# review to its immutable content/version path, never just the game title.
+REVIEWED_STEAM_ASSETS = {
+    "/store_trailers/1546400/483935/c3e944b1dee0ea3c624ba17abf9d6e31a6357641/1750699784/hls_264_master.m3u8": ("en", 79),
+    "/store_trailers/1546400/483935/c3e944b1dee0ea3c624ba17abf9d6e31a6357641/1750699784/dash_h264.mpd": ("en", 79),
+}
+
+
+def reviewed_steam_language(url, duration):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "video.akamai.steamstatic.com":
+        return None
+    review = REVIEWED_STEAM_ASSETS.get(parsed.path)
+    return review[0] if review and abs(duration - review[1]) <= 0.5 else None
 
 
 def language_of(metadata):
@@ -87,9 +101,9 @@ def official_youtube(info, title, owners, *, require_language=True):
     )
 
 
-async def command(*args, timeout=90):
+async def command(*args, timeout=90, env=None):
     process = await asyncio.create_subprocess_exec(
-        *map(str, args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        *map(str, args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except BaseException:
@@ -122,6 +136,7 @@ def text_language(text):
 async def visual_language(source, duration, directory, index):
     """Recognize visible trailer text; never infer language from store locale."""
     texts = []
+    stage = "fotogramma"
     try:
         positions = (duration * 0.03, duration * 0.25, duration * 0.50, duration * 0.75, max(0, duration - 2))
         # End cards often contain the only readable language evidence. Inspect
@@ -130,9 +145,13 @@ async def visual_language(source, duration, directory, index):
             position = positions[sample]
             frame = Path(directory) / f"language-{index}-{sample}.png"
             height = 1080 if sample == 4 else 720
+            stage = "estrazione fotogramma"
             await command("ffmpeg", "-v", "error", "-y", "-ss", str(position),
-                          "-i", source, "-frames:v", "1", "-vf", f"scale=-2:{height}", frame, timeout=10)
-            recognized = await command("tesseract", frame, "stdout", "-l", "eng+ita", "--psm", "11", timeout=10)
+                          "-threads", "1", "-i", source, "-frames:v", "1", "-vf", f"scale=-2:{height}",
+                          "-filter_threads", "1", "-threads", "1", "-compression_level", "1", frame, timeout=40)
+            stage = "riconoscimento testo"
+            recognized = await command("tesseract", frame, "stdout", "-l", "eng+ita", "--psm", "11", timeout=40,
+                                       env=dict(os.environ, OMP_THREAD_LIMIT="1"))
             text = " ".join(recognized.decode(errors="replace").split())
             if text not in texts:
                 texts.append(text)
@@ -141,7 +160,7 @@ async def visual_language(source, duration, directory, index):
                 return language
         return text_language(" ".join(texts))
     except Exception as exc:
-        log.info("Verifica lingua visiva non disponibile: %s", type(exc).__name__)
+        log.info("Verifica lingua visiva non disponibile: %s, fase=%s", type(exc).__name__, stage)
         return None
 
 
@@ -391,9 +410,13 @@ class TrailerService:
         if language and any(tag and tag != language for tag in tags):
             return None
         language = language or (tags[0] if tags and len(set(tags)) == 1 else None)
+        if language is None and candidate["kind"] in ("steam", "steam_stream"):
+            language = reviewed_steam_language(candidate["url"], duration)
+            if language:
+                log.info("Lingua trailer confermata dalla revisione dello specifico video Steam: %s", language)
         if language is None:
             try:
-                language = await asyncio.wait_for(visual_language(source, duration, directory, index), timeout=40)
+                language = await asyncio.wait_for(visual_language(source, duration, directory, index), timeout=90)
             except asyncio.TimeoutError:
                 log.info("Verifica lingua visiva: tempo massimo raggiunto")
             if language:
@@ -405,7 +428,7 @@ class TrailerService:
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
         await command("ffmpeg", "-v", "error", "-y", "-i", source,
                       "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:480",
-                      "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-b:v", "1200k",
+                      "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-b:v", "1200k",
                       "-maxrate", "1400k", "-bufsize", "2800k", "-pix_fmt", "yuv420p",
                       "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", target,
                       timeout=180)
