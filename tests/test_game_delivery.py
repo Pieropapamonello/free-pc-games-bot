@@ -119,6 +119,9 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch.object(bot.trailer_service, "send", AsyncMock(return_value=True))
         self.send = patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = patch.object(bot.trailer_service, "gameplay", AsyncMock(return_value=None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def asyncTearDown(self):
         if bot._media_tasks:

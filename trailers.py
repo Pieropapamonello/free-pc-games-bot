@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import weakref
 from pathlib import Path
 
 import aiohttp
+from nello_downloader import download_youtube
 
 log = logging.getLogger(__name__)
 MAX_SECONDS = 180
@@ -107,6 +109,48 @@ class TrailerService:
         self.locks = weakref.WeakValueDictionary()
         self.slots = asyncio.Semaphore(2)
         self.cache = {}  # file_id or negative result; bounded, expires after 10 min/6 h
+        self.gameplay_cache = {}
+
+    async def gameplay(self, title):
+        async with self.slots:
+            return await self._gameplay(title)
+
+    async def _gameplay(self, title):
+        cached = self.gameplay_cache.get(title)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        fallback = None
+        wanted = re.findall(r"\w+", title.casefold())
+        for query in (f"{title} gameplay italiano", f"{title} gameplay"):
+            try:
+                results = json.loads(await command(sys.executable, "-m", "yt_dlp",
+                    "--ignore-config", "--no-warnings", "--js-runtimes", "node",
+                    "--flat-playlist", "--dump-single-json", "--socket-timeout", "10",
+                    f"ytsearch3:{query}", timeout=35))
+                for entry in results.get("entries") or []:
+                    video_id = entry.get("id", "")
+                    name = entry.get("title") or ""
+                    words = re.findall(r"\w+", name.casefold())
+                    matches = any(words[i:i + len(wanted)] == wanted for i in range(len(words)))
+                    if not wanted or not matches or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                        continue
+                    if not re.search(r"\b(gameplay|walkthrough|lets play|let.s play)\b", name, re.I):
+                        continue
+                    if entry.get("is_live"):
+                        continue
+                    result = {"url": f"https://www.youtube.com/watch?v={video_id}", "language": language_of(entry)}
+                    fallback = fallback or result
+                    if result["language"] == "it":
+                        fallback = result
+                        break
+                if fallback and fallback.get("language") == "it":
+                    break
+            except Exception as exc:
+                log.info("Ricerca gameplay %s: %s", title, type(exc).__name__)
+        if len(self.gameplay_cache) >= 128:
+            self.gameplay_cache.pop(next(iter(self.gameplay_cache)))
+        self.gameplay_cache[title] = (time.monotonic() + (21600 if fallback else 600), fallback)
+        return fallback
 
     async def candidates(self, title, steam):
         candidates = []
@@ -159,6 +203,14 @@ class TrailerService:
         source = Path(directory) / f"source-{index}.mp4"
         expected_duration = candidate.get("duration")
         if candidate["kind"] == "youtube":
+            if os.getenv("DOWNLOADER_URL") and os.getenv("DOWNLOADER_TOKEN"):
+                try:
+                    await download_youtube(session, candidate["url"], source, MAX_DOWNLOAD)
+                    candidate = dict(candidate, kind="nello")
+                except Exception as exc:
+                    source.unlink(missing_ok=True)
+                    log.info("Downloader Nello non disponibile: %s", type(exc).__name__)
+        if candidate["kind"] == "youtube":
             lang = candidate["language"]
             await command(
                 sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
@@ -179,7 +231,7 @@ class TrailerService:
             await command("ffmpeg", "-v", "error", "-y", "-rw_timeout", "20000000",
                           "-i", candidate["url"], "-map", "0:v:0", "-map", "0:a:0?",
                           "-c", "copy", "-fs", str(MAX_DOWNLOAD + 1), source, timeout=120)
-        else:
+        elif candidate["kind"] != "nello":
             async with session.get(candidate["url"], timeout=aiohttp.ClientTimeout(total=90)) as response:
                 response.raise_for_status()
                 if response.content_length and response.content_length > MAX_DOWNLOAD:
@@ -256,7 +308,7 @@ class TrailerService:
             # inside the file may identify an Italian trailer.
             with tempfile.TemporaryDirectory(prefix="official-trailer-") as directory:
                 prepared = []
-                for index, candidate in enumerate(sorted(candidates, key=lambda c: c.get("language") != "it")[:8]):
+                for index, candidate in enumerate(sorted(candidates, key=lambda c: (c.get("language") != "it", c.get("kind") != "youtube"))[:8]):
                     try:
                         trailer = await self.prepare(candidate, session, directory, index)
                         if trailer:

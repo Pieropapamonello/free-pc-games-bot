@@ -38,6 +38,21 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 
 ## Descrizioni e video
 
+Nelle schede singole il titolo apre WhatsApp con il testo del gioco precompilato.
+Il link gameplay cerca prima video italiani e poi video in qualsiasi lingua,
+verificando la corrispondenza del titolo; se la ricerca non riesce resta un link
+"Cerca gameplay". Le ricerche avvengono in background con massimo due attivita'.
+I trailer YouTube ufficiali hanno priorita' tra i candidati della stessa lingua;
+resta il limite di 180 secondi e la verifica del canale sviluppatore/editore.
+
+Il client `nello_downloader.py` usa il protocollo `/jobs` del progetto
+[Nello](https://github.com/Pieropapamonello/Nello). Per attivarlo impostare
+`DOWNLOADER_URL` all'URL del servizio downloader e `DOWNLOADER_TOKEN` al suo
+token su Render. L'URL del bot Nello e quello del downloader possono differire:
+il servizio necessario espone `/healthz` e `/jobs`. Non inserire il token nel
+repository. Senza configurazione, o se Nello fallisce, si usa yt-dlp locale.
+Anche i file estratti da Nello vengono verificati per durata, lingua e formato.
+
 Gli elenchi mostrano numeri cliccabili, senza una griglia di pulsanti.
 Toccando il numero si apre WhatsApp con nome, piattaforma, scadenza se nota e
 link del gioco precompilati. Prime/abbonamento e DLC sono indicati quando

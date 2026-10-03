@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py trailers.py ./
+COPY bot.py trailers.py nello_downloader.py ./
 
 RUN mkdir -p /data && chmod -R 777 /data
 

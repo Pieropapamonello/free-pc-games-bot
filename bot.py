@@ -1442,7 +1442,7 @@ def format_game(g: dict) -> str:
         description = ("Un titolo di " + " e ".join(genres) + ". " if genres else "")
         description += "Scopri dettagli e requisiti nella pagina del gioco."
     parts = [f"<b>{html_escape(availability)}</b>", "",
-             f"<b>{html_escape(title.upper())}</b>", "",
+             "<b>" + text_link("https://wa.me/?text=" + quote(share_game_text(g), safe=""), title.upper()) + "</b>", "",
              html_escape(description), ""]
     if subscription:
         parts.append("💳 Richiede un abbonamento attivo" + (" Amazon Prime" if "prime" in source.lower() or "amazon" in source.lower() else ""))
@@ -1451,6 +1451,10 @@ def format_game(g: dict) -> str:
         parts.append("⏳ <b>Scade:</b> " + html_escape(date))
     if g.get("url"):
         parts.append("📥 <b>Scarica da:</b> " + text_link(g["url"], source))
+    gameplay_url = g.get("gameplay_url") or "https://www.youtube.com/results?search_query=" + quote(title + " gameplay italiano")
+    gameplay_label = ("Gameplay in italiano" if g.get("gameplay_language") == "it" else
+                      "Gameplay" if g.get("gameplay_url") else "Cerca gameplay")
+    parts.append("🎮 " + text_link(gameplay_url, gameplay_label))
     # Attribuzione richiesta dalle API, mantenuta compatta e cliccabile.
     if g.get("source_url") and urlparse(g.get("url", "")).hostname != urlparse(g["source_url"]).hostname:
         parts.append("↗ " + text_link(g["source_url"], source))
@@ -1602,12 +1606,24 @@ async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: 
         async with asyncio.timeout(300):
             if TRANSLATION_UNAVAILABLE in caption:
                 caption = await _refresh_description(chat_id, message_id, g, caption)
+            gameplay = await trailer_service.gameplay(display_title(g["title"]))
+            if gameplay:
+                g = dict(g, gameplay_url=gameplay["url"], gameplay_language=gameplay.get("language"))
+                updated = await asyncio.to_thread(format_game, g)
+                if telegram_text_size(updated) <= 1000:
+                    response = await tg_api("editMessageCaption", chat_id=chat_id, message_id=message_id,
+                                            caption=updated, parse_mode="HTML")
+                    if not response.get("ok") and response.get("error_code") == 400:
+                        response = await tg_api("editMessageText", chat_id=chat_id, message_id=message_id,
+                                                text=updated, parse_mode="HTML", disable_web_page_preview=True)
+                    if response.get("ok"):
+                        caption = updated
             info = await steam_lookup(g["title"])
             if g.get("enrich_description") and info and info.get("description"):
                 enriched = await asyncio.to_thread(format_game, dict(g, description=info["description"]))
-                if len(enriched) <= 1000 and TRANSLATION_UNAVAILABLE not in enriched:
+                if telegram_text_size(enriched) <= 1000 and TRANSLATION_UNAVAILABLE not in enriched:
                     caption = enriched
-            await trailer_service.send(chat_id, clean_title(g["title"]), caption, info,
+            await trailer_service.send(chat_id, display_title(g["title"]), caption, info,
                                        await get_session(), API, tg_api, message_id=message_id)
     except Exception as exc:
         log.info("Scheda mantenuta senza trailer per %s: %s", g["title"], exc)
@@ -1617,7 +1633,7 @@ async def _refresh_description(chat_id: int, message_id: int, g: dict, caption: 
     for delay in (15, 45, 90):
         await asyncio.sleep(delay)
         updated = await asyncio.to_thread(format_game, g)
-        if TRANSLATION_UNAVAILABLE in updated or len(updated) > 1000:
+        if TRANSLATION_UNAVAILABLE in updated or telegram_text_size(updated) > 1000:
             continue
         result = await tg_api("editMessageCaption", chat_id=chat_id, message_id=message_id,
                               caption=updated, parse_mode="HTML")
@@ -1632,12 +1648,12 @@ async def _refresh_description(chat_id: int, message_id: int, g: dict, caption: 
 async def send_game(chat_id: int, g: dict):
     caption = await asyncio.to_thread(format_game, g)
     # Keep the card short enough to become the video caption later.
-    if len(caption) > 1000:
+    if telegram_text_size(caption) > 1000:
         compact = dict(g, title=clean_title(g["title"])[:100], source_url="")
         caption = await asyncio.to_thread(format_game, compact)
     result = None
     banner = g.get("image") or g.get("thumbnail")
-    if banner and urlparse(banner).scheme in ("https", "http") and len(caption) <= 1000:
+    if banner and urlparse(banner).scheme in ("https", "http") and telegram_text_size(caption) <= 1000:
         try:
             result = await tg_api("sendPhoto", chat_id=chat_id, photo=banner,
                                   caption=caption, parse_mode="HTML")
@@ -1651,7 +1667,7 @@ async def send_game(chat_id: int, g: dict):
     if not result.get("ok"):
         raise RuntimeError(result.get("description", "Invio scheda fallito"))
     message_id = (result.get("result") or {}).get("message_id")
-    if message_id is not None and len(caption) <= 1000 and len(_media_tasks) < 256:
+    if message_id is not None and telegram_text_size(caption) <= 1000 and len(_media_tasks) < 256:
         task = asyncio.create_task(_attach_game_trailer(chat_id, message_id, dict(g), caption))
         _media_tasks.add(task)
         task.add_done_callback(_media_tasks.discard)
