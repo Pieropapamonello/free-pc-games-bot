@@ -19,6 +19,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 import requests
 from langdetect import DetectorFactory, detect, LangDetectException
+from bs4 import BeautifulSoup
 
 from trailers import TrailerService
 
@@ -1148,6 +1149,134 @@ async def fetch_cheapshark() -> list[dict]:
     return games
 
 
+async def fetch_html(url: str) -> str:
+    session = await get_session()
+    async with session.get(url, headers={"User-Agent": "free-pc-games-bot/1.0"}) as response:
+        response.raise_for_status()
+        return await response.text()
+
+
+def parse_itch_promotions(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    games = []
+    for cell in soup.select(".game_cell"):
+        discount = cell.select_one(".sale_tag")
+        title = cell.select_one(".game_title .title")
+        price = cell.select_one(".price_value")
+        if not discount or discount.get_text(strip=True) != "-100%" or not title or not price:
+            continue
+        if re.sub(r"[^0-9.]", "", price.get_text(strip=True)) not in ("0", "0.00"):
+            continue
+        name = title.get_text(" ", strip=True)
+        if re.search(r"\b(demo|prologue|playtest|soundtrack|dlc)\b", name, re.I):
+            continue
+        link = title.get("href", "")
+        if not (urlparse(link).hostname or "").endswith(".itch.io"):
+            continue
+        image = cell.select_one("img")
+        description = cell.select_one(".game_text")
+        sale = cell.select_one(".price_tag.sale")
+        categories = []
+        if cell.select_one(".icon-windows8, .icon-tux, .icon-apple, .web_flag"):
+            categories.append("pc")
+        if cell.select_one(".icon-android"):
+            categories.append("android")
+        if not categories:
+            continue
+        games.append({"id": "itch_" + (cell.get("data-game_id") or hashlib.sha256(link.encode()).hexdigest()[:20]),
+                      "title": name, "url": link, "source": "itch.io", "platform": "itch.io",
+                      "description": description.get_text(" ", strip=True) if description else "",
+                      "image": (image.get("data-lazy_src") or image.get("src") or "") if image else "",
+                      "categories": categories, "content_type": "game",
+                      "sale_url": "https://itch.io" + sale.get("href", "") if sale and sale.get("href", "").startswith("/s/") else ""})
+    return games
+
+
+async def fetch_itch_promotions() -> list[dict]:
+    games, seen = [], set()
+    try:
+        for page in range(1, 4):
+            html = await fetch_html(f"https://itch.io/games/on-sale?page={page}")
+            for game in parse_itch_promotions(html):
+                if game["id"] not in seen:
+                    seen.add(game["id"])
+                    games.append(game)
+        semaphore = asyncio.Semaphore(4)
+        deadlines = {}
+        async def deadline(url):
+            async with semaphore:
+                try:
+                    soup = BeautifulSoup(await fetch_html(url), "html.parser")
+                    date = soup.select_one(".promotion_dates .date_format")
+                    return date.get_text(strip=True) if date else "N/A"
+                except Exception:
+                    return "N/A"
+        urls = {g["sale_url"] for g in games if g["sale_url"]}
+        for url, date in zip(sorted(urls), await asyncio.gather(*(deadline(url) for url in sorted(urls)))):
+            deadlines[url] = date
+        for game in games:
+            game["end_date"] = deadlines.get(game.pop("sale_url"), "N/A")
+    except Exception as exc:
+        log.warning("itch.io non disponibile: %s", type(exc).__name__)
+    return games
+
+
+async def fetch_indiegala_freebies() -> list[dict]:
+    games = []
+    try:
+        soup = BeautifulSoup(await fetch_html("https://freebies.indiegala.com/"), "html.parser")
+        cards = soup.select(".products-col-inner")[:20]
+        semaphore = asyncio.Semaphore(4)
+        async def read_card(card):
+            title = card.select_one(".product-title")
+            anchor = card.select_one("a.fit-click")
+            if not title or not anchor:
+                return None
+            name, url = title.get_text(" ", strip=True), anchor.get("href", "")
+            if urlparse(url).hostname != "freebies.indiegala.com" or re.search(r"\b(demo|prologue|playtest)\b", name, re.I):
+                return None
+            async with semaphore:
+                info = await steam_lookup(name)
+                # Escludere il catalogo sempre gratuito: serve un prezzo normale verificabile.
+                if not info or not info.get("official_match") or not re.search(r"[1-9]", str(info.get("price") or "")):
+                    return None
+                detail = BeautifulSoup(await fetch_html(url), "html.parser")
+                if "ADD TO LIBRARY" not in detail.get_text(" ", strip=True).upper():
+                    return None
+                description = detail.select_one('.developer-product-description:not(.display-none)')
+                image = card.select_one("img")
+                return {"id": "indiegala_" + normalize_title(name), "title": name, "url": url,
+                        "source": "IndieGala", "platform": "PC (IndieGala)", "categories": ["pc"],
+                        "content_type": "game", "end_date": "N/A",
+                        "description": description.get_text(" ", strip=True) if description else info.get("description", ""),
+                        "image": (image.get("data-img-src") or image.get("src") or "") if image else ""}
+        results = await asyncio.gather(*(read_card(card) for card in cards), return_exceptions=True)
+        games = [game for game in results if isinstance(game, dict)]
+    except Exception as exc:
+        log.warning("IndieGala non disponibile: %s", type(exc).__name__)
+    return games
+
+
+def game_dedupe_id(game: dict) -> str:
+    identity = game.get("content_type", "game") + ":" + normalize_title(game["title"])
+    return "game_identity_" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+
+
+def game_tracking_ids(game: dict) -> set[str]:
+    ids = {game["id"], game.get("dedupe_id", ""),
+           f"gp_{game.get('content_type', 'game')}_{normalize_title(game['title'])}"}
+    if game.get("content_type") == "subscription":
+        ids.add(f"prime_{normalize_title(game['title'])}")
+    return ids - {""}
+
+
+def game_deliveries(game: dict) -> set[int]:
+    received = set()
+    for key in game_tracking_ids(game):
+        received.update(state.deliveries.get(key, set()))
+    return received
+
+
 async def fetch_all_games() -> list[dict]:
     batches = await asyncio.gather(
         fetch_epic_free(),
@@ -1157,6 +1286,8 @@ async def fetch_all_games() -> list[dict]:
         fetch_gamerpower_loot(),
         fetch_cheapshark(),
         fetch_mmobomb_giveaways(),
+        fetch_itch_promotions(),
+        fetch_indiegala_freebies(),
         return_exceptions=True,
     )
     seen, unique = set(), []
@@ -1174,7 +1305,7 @@ async def fetch_all_games() -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        unique.append(g)
+        unique.append(dict(g, dedupe_id=game_dedupe_id(g)))
     return unique
 
 
@@ -2060,14 +2191,14 @@ async def _broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
         games = await fetch_all_games()
-        new = [g for g in games if g["id"] not in state.sent]
+        new = [g for g in games if not game_tracking_ids(g) & state.sent]
         if not new:
             log.info("Nessun nuovo gioco.")
             return
         if seed_only:
             # Primo avvio con lista 'sent' vuota: marca i giochi già disponibili
             # come 'visti' SENZA inviarli, per non spammare le chat ad ogni deploy.
-            state.mark_sent([g["id"] for g in new])
+            state.mark_sent([gid for g in new for gid in (g["id"], g.get("dedupe_id")) if gid])
             log.info("Seed iniziale: marcati %d giochi come già visti (nessun invio)", len(new))
             return
         # Lock anti-duplicati: se un'altra istanza sta già inviando, salta.
@@ -2086,12 +2217,12 @@ async def _broadcast_new_games(seed_only: bool = False):
                 continue
             for g in chat_games:
                 recipients[g["id"]].add(chat_id)
-            pending_games = [g for g in chat_games if chat_id not in state.deliveries.get(g["id"], set())]
+            pending_games = [g for g in chat_games if chat_id not in game_deliveries(g)]
             for batch, text in delivery_units(chat_id, pending_games):
                 try:
                     if await send_delivery_unit(chat_id, batch, text):
                         for g in batch:
-                            await asyncio.to_thread(state.record_delivery, g["id"], chat_id)
+                            await asyncio.to_thread(state.record_delivery, g.get("dedupe_id") or g["id"], chat_id)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     msg = str(e).lower()
@@ -2101,9 +2232,11 @@ async def _broadcast_new_games(seed_only: bool = False):
                     log.warning("Errore invio chat %s: %s", chat_id, e)
         for cid in dead:
             state.unsubscribe(cid)
+        by_id = {g["id"]: g for g in new}
         complete = [gid for gid, targets in recipients.items()
-                    if targets and (targets & state.chats) <= state.deliveries.get(gid, set())]
+                    if targets and (targets & state.chats) <= game_deliveries(by_id[gid])]
         state.mark_sent(complete)
+        state.mark_sent([g["dedupe_id"] for g in new if g["id"] in complete and g.get("dedupe_id")])
     except Exception as e:
         log.exception("Errore broadcast: %s", e)
 

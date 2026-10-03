@@ -99,6 +99,12 @@ Le condizioni di abbonamento e la distinzione DLC restano visibili.
 
 ## Fonti
 
+- itch.io diretto: prime tre pagine dei giochi in offerta, soltanto prezzo zero
+  e sconto 100%, con piattaforme riconoscibili. Esclude demo/prologhi/playtest,
+  soundtrack e DLC; legge le scadenze dalle pagine ufficiali delle promozioni.
+- IndieGala Freebies diretto: verifica il riscatto sulla pagina del gioco e
+  richiede una corrispondenza Steam esatta con prezzo normale positivo;
+  esclude demo/prologhi/playtest e titoli sempre gratuiti o non verificabili.
 - Epic Games: promozioni e prossime uscite gratuite.
 - [GamerPower](https://www.gamerpower.com/api-read): giochi di tutte le piattaforme
   disponibili, inclusi Steam, GOG, itch.io, console e mobile, più DLC/loot.
@@ -120,6 +126,12 @@ impediscono di consultare le altre. La disponibilità effettiva va confermata
 nella pagina dello store.
 
 I giochi free-to-play permanenti sono esclusi da liste, ricerche e avvisi.
+La deduplicazione usa nome normalizzato e tipo di contenuto. Uno stesso gioco
+presente in piu' fonti compare una sola volta. Per gli avvisi e le ricevute si
+salva anche un identificatore indipendente dalla fonte, evitando ripetizioni
+quando una fonte scompare e un'altra trova lo stesso titolo. Vengono riconosciuti
+anche i vecchi identificatori GamerPower e Prime. Giochi e DLC/abbonamenti
+restano distinti per non nascondere condizioni diverse di riscatto.
 Le promozioni con una data di fine gia' passata sono escluse. Quando la fonte
 non comunica una data, la scadenza viene omessa dalla scheda e dall'elenco.
 I nomi ricavati dagli URL Prime Gaming vengono capitalizzati per la lettura.

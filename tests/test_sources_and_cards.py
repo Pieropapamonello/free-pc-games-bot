@@ -35,7 +35,7 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_isolated_and_cross_source_titles_deduplicated(self):
         names = ["fetch_epic_free", "fetch_gamerpower_all", "fetch_reddit_all",
                  "fetch_prime_gaming", "fetch_gamerpower_loot", "fetch_cheapshark",
-                 "fetch_mmobomb_giveaways"]
+                 "fetch_mmobomb_giveaways", "fetch_itch_promotions", "fetch_indiegala_freebies"]
         mocks = {}
         for name in names:
             replacement = AsyncMock(return_value=[])
