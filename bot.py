@@ -1638,9 +1638,17 @@ async def steam_lookup(title: str) -> Optional[dict]:
 
 
 _media_tasks: set[asyncio.Task] = set()
+_media_card_slots = asyncio.Semaphore(2)
 
 
 async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: str):
+    # Queue complete cards before starting their deadline. Otherwise a large
+    # list spends all 300 seconds waiting for gameplay/trailer worker slots.
+    async with _media_card_slots:
+        await _process_game_media(chat_id, message_id, g, caption)
+
+
+async def _process_game_media(chat_id: int, message_id: int, g: dict, caption: str):
     try:
         # The card is already visible; slow media lookup must not hold up games.
         async with asyncio.timeout(300):
@@ -1658,13 +1666,14 @@ async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: 
                                                 text=updated, parse_mode="HTML", disable_web_page_preview=True)
                     if response.get("ok"):
                         caption = updated
-            info = await steam_lookup(g["title"])
+            info = await steam_lookup(display_title(g["title"]))
             if g.get("enrich_description") and info and info.get("description"):
                 enriched = await asyncio.to_thread(format_game, dict(g, description=info["description"]))
                 if telegram_text_size(enriched) <= 1000 and TRANSLATION_UNAVAILABLE not in enriched:
                     caption = enriched
-            await trailer_service.send(chat_id, display_title(g["title"]), caption, info,
+            sent = await trailer_service.send(chat_id, display_title(g["title"]), caption, info,
                                        await get_session(), API, tg_api, message_id=message_id)
+            log.info("Trailer %s: %s", g["title"], "allegato" if sent else "nessun candidato ufficiale verificato e utilizzabile")
     except Exception as exc:
         log.info("Scheda mantenuta senza trailer per %s: %s", g["title"], exc)
 

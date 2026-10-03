@@ -54,6 +54,26 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
 
 class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_start.StartRoutingTests.asyncSetUp
+
+    async def test_media_queue_runs_complete_cards_with_bounded_concurrency(self):
+        import asyncio
+        active, peak, finished = 0, 0, []
+        async def process(chat, message, game, caption):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            finished.append(message)
+            active -= 1
+        with patch.object(bot, "_media_card_slots", asyncio.Semaphore(2)), patch.object(bot, "_process_game_media", process):
+            await asyncio.gather(*(bot._attach_game_trailer(1, index, {}, "Caption") for index in range(6)))
+        self.assertEqual(peak, 2)
+        self.assertEqual(sorted(finished), list(range(6)))
+
+    async def test_trailer_lookup_uses_game_title_without_store_suffix(self):
+        with patch.object(bot.trailer_service, "gameplay", AsyncMock(return_value=None)), patch.object(bot.trailer_service, "send", AsyncMock(return_value=False)), patch.object(bot, "get_session", AsyncMock()), patch.object(bot, "steam_lookup", AsyncMock(return_value=None)) as lookup:
+            await bot._process_game_media(1, 2, {"title": "GigaBash (Stove)"}, "Caption")
+        lookup.assert_awaited_once_with("GigaBash")
     async def test_free_to_play_catalog_does_not_generate_notifications(self):
         old = dict(self.games[0], id="ftg_1", catalog="freetogame", access_model="free_to_play")
         new = dict(old, id="ftg_2", title="New title")

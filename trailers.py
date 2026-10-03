@@ -304,6 +304,8 @@ class TrailerService:
             if len(self.cache) >= 128:
                 self.cache.pop(next(iter(self.cache)))
             candidates = await self.candidates(title, steam)
+            log.info("Trailer %s: candidati=%s, identita_store=%s, downloader_configurato=%s",
+                     title, len(candidates), bool(steam and steam.get("official_match")), nello_configured())
             # Prepare all unlabelled Steam videos before choosing English: tags
             # inside the file may identify an Italian trailer.
             with tempfile.TemporaryDirectory(prefix="official-trailer-") as directory:
