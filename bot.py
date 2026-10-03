@@ -1600,7 +1600,7 @@ def delivery_units(chat_id: int, games: list[dict]):
         groups.setdefault(device, []).append(game)
     units = []
     for device, group in groups.items():
-        header = f"🎁 <b>GIOCHI GRATIS · {html_escape(device)}</b>\n\n"
+        header = f"<b>{html_escape(device)}</b>\n\n"
         text, batch, previous_store = header, [], None
         for game in sorted(group, key=game_sort_key):
             title = clean_title(game["title"])[:180]
