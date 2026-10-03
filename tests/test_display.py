@@ -68,7 +68,7 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         games.append(dict(self.games[0], id="mobile", categories=["android"]))
         units = bot.delivery_units(101, games)
         self.assertGreater(len(units), 2)
-        self.assertTrue(all(len(text) <= 3900 for _, text in units))
+        self.assertTrue(all(bot.telegram_text_size(text) <= 4000 for _, text in units))
         self.assertEqual(sum(len(batch) for batch, _ in units), 71)
         self.assertIn("Android / iOS", units[-1][1])
 
@@ -105,3 +105,22 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         newer = dict(older, end_date="2027-01-01")
         self.assertLess(bot.game_sort_key(older), bot.game_sort_key(newer))
         self.assertEqual(bot.format_date_it("2026-10-05T12:00:00Z"), "5 Ottobre")
+
+    def test_long_hidden_links_do_not_split_short_visible_list(self):
+        bot.state.set_display(101, "digest")
+        games = [dict(self.games[0], id=str(i), title=f"Game {i} (Steam)",
+                      url="https://example.com/" + "x" * 1000) for i in range(30)]
+        units = bot.delivery_units(101, games)
+        self.assertEqual(len(units), 1)
+        self.assertNotIn("(Steam)", units[0][1])
+
+    def test_only_store_parentheses_removed_and_multiplatform_game_not_separate_group(self):
+        self.assertEqual(bot.display_title("Example (Anniversary Edition) (Steam Key)"),
+                         "Example (Anniversary Edition)")
+        bot.state.set_display(101, "digest")
+        bot.state.set_prefs(101, {"pc", "android"})
+        games = [dict(self.games[0], categories=["pc"]),
+                 dict(self.games[0], id="multi", categories=["pc", "android"])]
+        units = bot.delivery_units(101, games)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(len(units[0][0]), 2)

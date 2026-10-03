@@ -306,6 +306,18 @@ def clean_title(t: str) -> str:
     return t.strip()
 
 
+def display_title(title: str) -> str:
+    title = clean_title(title)
+    stores = r"steam(?: key)?|epic(?: games)?(?: store)?|gog|indiegala|itch\.?io\.?|stove|mobile|pc|android|ios|rift|oculus|meta quest|xbox|playstation|switch|ubisoft|drm[- ]free"
+    title = re.sub(rf"\s*\((?:{stores})\)\s*", " ", title, flags=re.I)
+    return " ".join(title.split())
+
+
+def telegram_text_size(html: str) -> int:
+    visible = unescape(re.sub(r"<[^>]+>", "", html))
+    return len(visible.encode("utf-16-le")) // 2
+
+
 def hashtag(t: str) -> str:
     s = re.sub(r"[^\w]+", "_", t).strip("_")
     return f"#{s}" if s else ""
@@ -1398,7 +1410,7 @@ def text_link(url: str, label: str) -> str:
 
 
 def format_game(g: dict) -> str:
-    title = clean_title(g["title"])
+    title = display_title(g["title"])
     cats = set(g.get("categories") or ["pc"])
     labels = [label for cat, label in (("pc", "PC"), ("console", "Console"),
                                       ("android", "Android / iOS")) if cat in cats]
@@ -1727,14 +1739,15 @@ def delivery_units(chat_id: int, games: list[dict]):
         categories = set(game.get("categories") or ["pc"])
         if "all" not in wanted:
             categories &= wanted
-        device = " / ".join(label for cat, label in labels.items() if cat in categories) or "🎮 Altri dispositivi"
+        # Un titolo multipiattaforma entra una sola volta nel primo dispositivo scelto.
+        device = next((label for cat, label in labels.items() if cat in categories), "🎮 Altri dispositivi")
         groups.setdefault(device, []).append(game)
     units = []
     for device, group in groups.items():
         header = f"<b>{html_escape(device)}</b>\n\n"
         text, batch, previous_store = header, [], None
         for game in sorted(group, key=game_sort_key):
-            title = clean_title(game["title"])[:180]
+            title = display_title(game["title"])[:180]
             url = game.get("url") or game.get("source_url") or ""
             link = text_link(url, title) if urlparse(url).scheme in ("https", "http") and len(url) <= 1500 else html_escape(title)
             note = ""
@@ -1751,7 +1764,7 @@ def delivery_units(chat_id: int, games: list[dict]):
             line = f"• {link}{note}\n"
             store = game_store(game)
             store_heading = f"\n🛒 <b>{html_escape(store)}</b>\n" if store != previous_store else ""
-            if len(text) + len(store_heading) + len(line) > 3900 and batch:
+            if telegram_text_size(text + store_heading + line) > 4000 and batch:
                 units.append((batch, text))
                 text, batch = header, []
                 store_heading = f"🛒 <b>{html_escape(store)}</b>\n"

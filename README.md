@@ -9,8 +9,11 @@ Deploy webhook su Render.
   viene conservata in Firebase e in `display_prefs.json`, e vale per `/start`,
   `/giochi`, `/cerca` e avvisi automatici. Il riepilogo contiene titoli cliccabili,
   scadenze e condizioni DLC/abbonamento, senza immagini o video.
-  I dispositivi condivisi hanno un'intestazione combinata per evitare duplicati.
-  Gli elenchi lunghi vengono divisi in messaggi entro i limiti di Telegram.
+  I titoli multipiattaforma vengono inseriti una volta nel primo dispositivo
+  scelto (PC, Console, Android/iOS), senza un ulteriore gruppo combinato.
+  Gli elenchi si dividono solo oltre 4000 unita' UTF-16 di testo visibile:
+  URL nascosti e tag HTML non contribuiscono al conteggio. I titoli omettono
+  parentesi di store/piattaforma, conservando quelle proprie del nome del gioco.
   Gli elenchi sono ordinati per store (con intestazioni) e poi per scadenza
   crescente; le scadenze sconosciute sono in fondo allo store. Le date mostrate
   omettono l'anno, conservato per ordinamento e verifica delle offerte scadute.
