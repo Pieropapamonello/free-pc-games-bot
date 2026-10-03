@@ -32,11 +32,12 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 
 ## Descrizioni e video
 
-Gli elenchi numerano i giochi e mostrano piccoli pulsanti in righe da cinque:
-"📋 1" copia nome, piattaforma, scadenza se nota e link del gioco numero 1.
-Il testo include le condizioni Prime/abbonamento e DLC quando necessarie.
-Per testi oltre 256 unita' UTF-16 si usa "📲 1", che apre WhatsApp con il testo
-completo precompilato senza inviarlo. Il link non viene mai troncato.
+Gli elenchi mostrano numeri cliccabili, senza una griglia di pulsanti.
+Toccando il numero si apre WhatsApp con nome, piattaforma, scadenza se nota e
+link del gioco precompilati. Prime/abbonamento e DLC sono indicati quando
+necessari; il link non viene troncato. L'invio resta a scelta dell'utente.
+Telegram non permette di associare al numero una copia di testo nascosto:
+la pressione prolungata sul numero non copia il messaggio completo.
 L'intestazione itch.io viene mostrata come "itch" per evitare un collegamento
 automatico alla homepage; i titoli mantengono i link alle pagine dei giochi.
 

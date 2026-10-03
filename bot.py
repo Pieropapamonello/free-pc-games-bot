@@ -1749,16 +1749,9 @@ def share_game_text(game: dict) -> str:
     return "\n".join(parts)
 
 
-def share_button(game: dict, label: str) -> dict:
-    text = share_game_text(game)
-    if len(text.encode("utf-16-le")) // 2 <= 256:
-        return {"text": "📋 " + label, "copy_text": {"text": text}}
-    return {"text": "📲 " + label, "url": "https://wa.me/?text=" + quote(text, safe="")}
-
-
-def share_keyboard(games: list[dict]) -> dict:
-    buttons = [share_button(game, str(index)) for index, game in enumerate(games, 1)]
-    return {"inline_keyboard": [buttons[index:index + 5] for index in range(0, len(buttons), 5)]}
+def share_number(game: dict, number: int) -> str:
+    url = "https://wa.me/?text=" + quote(share_game_text(game), safe="")
+    return text_link(url, str(number))
 
 
 def delivery_units(chat_id: int, games: list[dict]):
@@ -1793,15 +1786,15 @@ def delivery_units(chat_id: int, games: list[dict]):
             date = format_date_it(game.get("end_date"))
             if date:
                 note += " · ⏳ " + html_escape(date[:100])
-            line = f"{len(batch) + 1}. {link}{note}\n"
+            line = f"{share_number(game, len(batch) + 1)}. {link}{note}\n"
             store = game_store(game)
             store_label = "itch" if store == "itch.io" else store
             store_heading = f"\n🛒 <b>{html_escape(store_label)}</b>\n" if store != previous_store else ""
-            if (telegram_text_size(text + store_heading + line) > 4000 or len(batch) >= 100) and batch:
+            if telegram_text_size(text + store_heading + line) > 4000 and batch:
                 units.append((batch, text))
                 text, batch = header, []
                 store_heading = f"🛒 <b>{html_escape(store_label)}</b>\n"
-                line = f"1. {link}{note}\n"
+                line = f"{share_number(game, 1)}. {link}{note}\n"
             text += store_heading + line
             batch.append(game)
             previous_store = store
@@ -1814,8 +1807,7 @@ async def send_delivery_unit(chat_id: int, batch: list[dict], text: Optional[str
     if text is None:
         return bool(await send_game(chat_id, batch[0]))
     response = await tg_api("sendMessage", chat_id=chat_id, text=text,
-                            parse_mode="HTML", disable_web_page_preview=True,
-                            reply_markup=share_keyboard(batch))
+                            parse_mode="HTML", disable_web_page_preview=True)
     if not response.get("ok"):
         raise RuntimeError(response.get("description", "Invio riepilogo fallito"))
     return True

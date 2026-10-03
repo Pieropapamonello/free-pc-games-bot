@@ -125,29 +125,30 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(units), 1)
         self.assertEqual(len(units[0][0]), 2)
 
-    async def test_numbered_copy_buttons_match_each_game_and_include_share_details(self):
+    async def test_share_number_contains_game_details_without_button_grid(self):
         bot.state.set_display(101, "digest")
         game = dict(self.games[0], title="Example (itch.io)", source="itch.io", end_date="2026-10-08")
         batch, text = bot.delivery_units(101, [game])[0]
         self.assertIn("<b>itch</b>", text)
         self.assertNotIn("<b>itch.io</b>", text)
-        self.assertIn("1. <a", text)
+        self.assertIn(">1</a>. <a", text)
         with patch.object(bot, "tg_api", AsyncMock(return_value={"ok": True})) as api:
             await bot.send_delivery_unit(101, batch, text)
-        button = api.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]
-        self.assertEqual(button["text"], "📋 1")
-        copied = button["copy_text"]["text"]
+        self.assertNotIn("reply_markup", api.call_args.kwargs)
+        anchor = bot.BeautifulSoup(text, "html.parser").find("a", string="1")
+        from urllib.parse import parse_qs
+        copied = parse_qs(bot.urlparse(anchor["href"]).query)["text"][0]
         self.assertIn("🎮 Example\n", copied)
         self.assertIn("Piattaforma: PC", copied)
         self.assertIn("Scade: 8 Ottobre", copied)
         self.assertIn(game["url"], copied)
 
-    def test_long_shares_keep_full_link_with_whatsapp_fallback(self):
+    def test_number_share_keeps_long_link_complete(self):
         game = dict(self.games[0], url="https://example.com/" + "x" * 300)
-        button = bot.share_button(game, "1")
-        self.assertNotIn("copy_text", button)
+        anchor = bot.BeautifulSoup(bot.share_number(game, 38), "html.parser").find("a")
+        self.assertEqual(anchor.get_text(), "38")
         from urllib.parse import parse_qs
-        copied = parse_qs(bot.urlparse(button["url"]).query)["text"][0]
+        copied = parse_qs(bot.urlparse(anchor["href"]).query)["text"][0]
         self.assertIn(game["url"], copied)
 
     def test_copy_content_preserves_prime_requirement_without_unknown_expiry(self):
