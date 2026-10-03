@@ -1803,13 +1803,27 @@ def delivery_units(chat_id: int, games: list[dict]):
     return units
 
 
-async def send_delivery_unit(chat_id: int, batch: list[dict], text: Optional[str]) -> bool:
+async def send_delivery_unit(chat_id: int, batch: list[dict], text: Optional[str], record_receipts: bool = False) -> bool:
     if text is None:
         return bool(await send_game(chat_id, batch[0]))
     response = await tg_api("sendMessage", chat_id=chat_id, text=text,
                             parse_mode="HTML", disable_web_page_preview=True)
     if not response.get("ok"):
+        log.warning("Errore invio riepilogo chat %s: codice=%s, dettaglio=%s, giochi=%d, testo=%d, HTML=%d",
+                    chat_id, response.get("error_code"), response.get("description"),
+                    len(batch), telegram_text_size(text), len(text))
+        if response.get("error_code") == 400 and len(batch) > 1:
+            # Alcuni elenchi con molti link possono essere rifiutati nonostante
+            # il testo visibile sia entro il limite. Dividere solo al rifiuto.
+            middle = len(batch) // 2
+            for part in (batch[:middle], batch[middle:]):
+                for sub_batch, sub_text in delivery_units(chat_id, part):
+                    await send_delivery_unit(chat_id, sub_batch, sub_text, record_receipts)
+            return True
         raise RuntimeError(response.get("description", "Invio riepilogo fallito"))
+    if record_receipts:
+        for game in batch:
+            await asyncio.to_thread(state.record_delivery, game.get("dedupe_id") or game["id"], chat_id)
     return True
 
 
@@ -1981,6 +1995,9 @@ def handle_update(update: dict) -> Optional[dict]:
                     f"• Chat totali iscritte: {len(state.chats)}\n"
                     f"• Intervallo controllo: ogni {POLL_MINUTES} min"
                     f"\n• Formato: {DISPLAY_MODES[state.get_display(chat_id)]} (/formato)"
+                    f"\n• Piattaforme: {', '.join(sorted(state.get_prefs(chat_id)))}"
+                    f"\n• Generi: {', '.join(sorted(state.get_genres(chat_id))) or 'Tutti'}"
+                    f"\n• Contenuti: {', '.join(sorted(state.get_content(chat_id)))}"
                 ),
             }
         if cmd == "/giochi":
@@ -2260,9 +2277,10 @@ async def _broadcast_new_games(seed_only: bool = False):
             pending_games = [g for g in chat_games if chat_id not in game_deliveries(g)]
             for batch, text in delivery_units(chat_id, pending_games):
                 try:
-                    if await send_delivery_unit(chat_id, batch, text):
+                    if await send_delivery_unit(chat_id, batch, text, record_receipts=True):
                         for g in batch:
-                            await asyncio.to_thread(state.record_delivery, g.get("dedupe_id") or g["id"], chat_id)
+                            if chat_id not in game_deliveries(g):
+                                await asyncio.to_thread(state.record_delivery, g.get("dedupe_id") or g["id"], chat_id)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     msg = str(e).lower()

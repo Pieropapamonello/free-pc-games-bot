@@ -156,3 +156,32 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         copied = bot.share_game_text(game)
         self.assertIn("Richiede Amazon Prime", copied)
         self.assertNotIn("Scade:", copied)
+
+    async def test_rejected_pc_digest_retried_as_smaller_lists_and_mobile_still_delivered(self):
+        bot.state.set_display(101, "digest")
+        bot.state.set_prefs(101, {"pc", "android"})
+        games = self.games + [dict(self.games[0], id="mobile", categories=["android"])]
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=games)), \
+             patch.object(bot, "tg_api", AsyncMock(side_effect=[
+                 {"ok": False, "error_code": 400, "description": "Bad Request: ENTITIES_TOO_LONG"},
+                 {"ok": True}, {"ok": True}, {"ok": True}])) as api:
+            await bot._handle_giochi(101)
+        self.assertEqual(api.await_count, 4)
+        self.assertIn("PC", api.await_args_list[1].kwargs["text"])
+        self.assertIn("Android / iOS", api.await_args_list[-1].kwargs["text"])
+        self.assertEqual(bot.state.sent, {"already_seen"})
+
+    async def test_split_broadcast_saves_successful_half_before_later_failure(self):
+        bot.state.chats = {101}
+        bot.state.set_display(101, "digest")
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=self.games)), \
+             patch.object(bot, "tg_api", AsyncMock(side_effect=[
+                 {"ok": False, "error_code": 400, "description": "Bad Request: ENTITIES_TOO_LONG"},
+                 {"ok": True}, {"ok": False, "error_code": 500, "description": "Temporary failure"}])):
+            await bot.broadcast_new_games()
+        self.assertEqual(bot.state.deliveries.get("game_0"), {101})
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=self.games)), \
+             patch.object(bot, "tg_api", AsyncMock(return_value={"ok": True})) as api:
+            await bot.broadcast_new_games()
+        self.assertNotIn("Game &lt;0&gt;", api.call_args.kwargs["text"])
+        self.assertTrue({g["id"] for g in self.games} <= bot.state.sent)

@@ -14,6 +14,11 @@ Deploy webhook su Render.
   Gli elenchi si dividono solo oltre 4000 unita' UTF-16 di testo visibile:
   URL nascosti e tag HTML non contribuiscono al conteggio. I titoli omettono
   parentesi di store/piattaforma, conservando quelle proprie del nome del gioco.
+  Se Telegram rifiuta l'elenco con errore 400 (ad esempio `ENTITIES_TOO_LONG`
+  per il volume dei collegamenti), il bot divide il gruppo e ritenta parti piu'
+  piccole. Le ricevute degli avvisi vengono salvate per ogni parte riuscita,
+  evitando duplicazioni se una parte successiva fallisce. `/status` mostra
+  piattaforme, generi e contenuti effettivamente selezionati nella chat.
   Gli elenchi sono ordinati per store (con intestazioni) e poi per scadenza
   crescente; le scadenze sconosciute sono in fondo allo store. Le date mostrate
   omettono l'anno, conservato per ordinamento e verifica delle offerte scadute.
