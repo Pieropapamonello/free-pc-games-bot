@@ -219,6 +219,7 @@ USE_FIREBASE = bool(FIREBASE_URL and FIREBASE_SECRET)
 
 
 DEFAULT_CONTENT = {"game"}  # default: solo giochi gratis pieni (no DLC, no abbonamenti)
+DISPLAY_MODES = {"cards": "🖼 Schede singole", "digest": "📋 Elenco per dispositivo"}
 
 
 class State:
@@ -228,9 +229,44 @@ class State:
         self.prefs: dict[int, set[str]] = {}
         self.genres_prefs: dict[int, set[str]] = {}
         self.content_prefs: dict[int, set[str]] = {}
+        self.display_prefs: dict[int, str] = {}
         self.deliveries: dict[str, set[int]] = {}
         self._load()
         self._load_deliveries()
+        self._load_display_prefs()
+
+    def _load_display_prefs(self):
+        try:
+            data = json.loads(CHATS_FILE.with_name("display_prefs.json").read_text(encoding="utf-8"))
+            self.display_prefs = {int(cid): mode for cid, mode in data.items() if mode in DISPLAY_MODES}
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        if USE_FIREBASE:
+            try:
+                data = firebase_get("prefs") or {}
+                for cid, prefs in data.items():
+                    mode = prefs.get("display") if isinstance(prefs, dict) else None
+                    if mode in DISPLAY_MODES:
+                        self.display_prefs[int(cid)] = mode
+            except Exception as exc:
+                log.warning("Lettura formato Firebase fallita: %s", exc)
+
+    def get_display(self, chat_id: int) -> str:
+        return self.display_prefs.get(chat_id, "cards")
+
+    def set_display(self, chat_id: int, mode: str):
+        if mode not in DISPLAY_MODES:
+            raise ValueError("Formato sconosciuto")
+        self.display_prefs[chat_id] = mode
+        path = CHATS_FILE.with_name("display_prefs.json")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.display_prefs), encoding="utf-8")
+        temporary.replace(path)
+        if USE_FIREBASE:
+            try:
+                firebase_put(f"prefs/{chat_id}/display", mode)
+            except Exception as exc:
+                log.warning("Salvataggio formato Firebase fallito: %s", exc)
 
     def _load_deliveries(self):
         path = SENT_FILE.with_name("delivery_receipts.json")
@@ -1405,6 +1441,71 @@ def content_keyboard(current: set[str]) -> dict:
     return {"inline_keyboard": rows}
 
 
+def display_keyboard(current: str) -> dict:
+    return {"inline_keyboard": [[{"text": ("✅ " if current == mode else "") + label,
+                                  "callback_data": f"display:{mode}"}]
+                                for mode, label in DISPLAY_MODES.items()]}
+
+
+def delivery_units(chat_id: int, games: list[dict]):
+    if state.get_display(chat_id) == "cards":
+        return [([g], None) for g in games]
+    groups = {}
+    wanted = state.get_prefs(chat_id)
+    labels = {"pc": "💻 PC", "console": "🎮 Console", "android": "📱 Android / iOS"}
+    for game in games:
+        categories = set(game.get("categories") or ["pc"])
+        if "all" not in wanted:
+            categories &= wanted
+        device = " / ".join(label for cat, label in labels.items() if cat in categories) or "🎮 Altri dispositivi"
+        groups.setdefault(device, []).append(game)
+    units = []
+    for device, group in groups.items():
+        header = f"🎁 <b>GIOCHI GRATIS · {html_escape(device)}</b>\n\n"
+        text, batch = header, []
+        for game in group:
+            title = clean_title(game["title"])[:180]
+            url = game.get("url") or game.get("source_url") or ""
+            link = text_link(url, title) if urlparse(url).scheme in ("https", "http") and len(url) <= 1500 else html_escape(title)
+            note = ""
+            if game.get("content_type") == "subscription" or any(
+                    source in game.get("source", "").lower() for source in ("prime", "amazon")):
+                note = " · 💳 Abbonamento"
+            elif game.get("content_type") == "dlc":
+                note = " · 🎁 DLC / contenuti"
+            elif game.get("access_model") == "free_to_play":
+                note = " · Free-to-play"
+            date = format_date_it(game.get("end_date"))
+            if date:
+                note += " · ⏳ " + html_escape(date[:100])
+            line = f"• {link}{note}\n"
+            if len(text) + len(line) > 3900 and batch:
+                units.append((batch, text))
+                text, batch = header, []
+            text += line
+            batch.append(game)
+        if batch:
+            units.append((batch, text))
+    return units
+
+
+async def send_delivery_unit(chat_id: int, batch: list[dict], text: Optional[str]) -> bool:
+    if text is None:
+        return bool(await send_game(chat_id, batch[0]))
+    response = await tg_api("sendMessage", chat_id=chat_id, text=text,
+                            parse_mode="HTML", disable_web_page_preview=True)
+    if not response.get("ok"):
+        raise RuntimeError(response.get("description", "Invio riepilogo fallito"))
+    return True
+
+
+async def _save_display(chat_id: int, msg_id: int, mode: str):
+    await asyncio.to_thread(state.set_display, chat_id, mode)
+    await tg_api("editMessageText", chat_id=chat_id, message_id=msg_id,
+                 text=f"✅ Formato salvato: {DISPLAY_MODES[mode]}\n\nVale per /giochi, /cerca e per i nuovi avvisi automatici.",
+                 reply_markup=display_keyboard(mode))
+
+
 def handle_update(update: dict) -> Optional[dict]:
     cb = update.get("callback_query")
     if cb:
@@ -1413,6 +1514,11 @@ def handle_update(update: dict) -> Optional[dict]:
         msg_id = (cb.get("message") or {}).get("message_id")
         cb_id = cb.get("id")
         if not chat_id:
+            return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
+        if data.startswith("display:"):
+            mode = data.split(":", 1)[1]
+            if mode in DISPLAY_MODES:
+                asyncio.create_task(_save_display(chat_id, msg_id, mode))
             return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
         if data.startswith("pref:"):
             code = data.split(":", 1)[1]
@@ -1497,6 +1603,10 @@ def handle_update(update: dict) -> Optional[dict]:
         if not chat_id or not text:
             return None
         cmd = text.split()[0].lower().split("@")[0]
+        if cmd == "/formato":
+            return {"method": "sendMessage", "chat_id": chat_id,
+                    "text": "📬 Come vuoi vedere i giochi?\n\n🖼 Una scheda con banner e descrizione per ogni gioco.\n📋 Un elenco di titoli e link per dispositivo, con meno messaggi.\n\nLa scelta vale anche per gli avvisi automatici.",
+                    "reply_markup": display_keyboard(state.get_display(chat_id))}
         if cmd == "/start" or cmd == "/piattaforme":
             added = state.subscribe(chat_id)
             current = state.get_prefs(chat_id)
@@ -1556,6 +1666,7 @@ def handle_update(update: dict) -> Optional[dict]:
                     f"• Questa chat: {'iscritta ✅' if sub else 'non iscritta ❌'}\n"
                     f"• Chat totali iscritte: {len(state.chats)}\n"
                     f"• Intervallo controllo: ogni {POLL_MINUTES} min"
+                    f"\n• Formato: {DISPLAY_MODES[state.get_display(chat_id)]} (/formato)"
                 ),
             }
         if cmd == "/giochi":
@@ -1620,10 +1731,11 @@ async def _handle_giochi(chat_id: int):
             await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco trovato per i tuoi filtri. Cambia con /piattaforme, /generi o /contenuti.")
             return
         delivered = 0
-        for g in games[:12]:
+        selected = games if state.get_display(chat_id) == "digest" else games[:12]
+        for batch, text in delivery_units(chat_id, selected):
             try:
-                if await send_game(chat_id, g):
-                    delivered += 1
+                if await send_delivery_unit(chat_id, batch, text):
+                    delivered += len(batch)
             except Exception as e:
                 log.warning("send_game fallito: %s", e)
         if not delivered:
@@ -1669,10 +1781,11 @@ async def _handle_cerca(chat_id: int, query: str):
             )
             return
         delivered = 0
-        for g in matches[:8]:
+        selected = matches if state.get_display(chat_id) == "digest" else matches[:8]
+        for batch, text in delivery_units(chat_id, selected):
             try:
-                if await send_game(chat_id, g):
-                    delivered += 1
+                if await send_delivery_unit(chat_id, batch, text):
+                    delivered += len(batch)
             except Exception as e:
                 log.warning("send_game (cerca) fallito: %s", e)
         if not delivered:
@@ -1709,6 +1822,7 @@ async def _finish_setup(chat_id: int, msg_id: int, chosen: str, cb_id: str):
                 "Comandi:\n"
                 "• /giochi – giochi disponibili ora\n"
                 "• /piattaforme – cambia piattaforme\n"
+                "• /formato – schede singole o elenco per dispositivo\n"
                 "• /generi – filtra per genere\n"
                 "• /status – stato iscrizione\n"
                 "• /stop – disiscriviti"
@@ -1835,12 +1949,12 @@ async def _broadcast_new_games(seed_only: bool = False):
                 continue
             for g in chat_games:
                 recipients[g["id"]].add(chat_id)
-            for g in chat_games:
-                if chat_id in state.deliveries.get(g["id"], set()):
-                    continue
+            pending_games = [g for g in chat_games if chat_id not in state.deliveries.get(g["id"], set())]
+            for batch, text in delivery_units(chat_id, pending_games):
                 try:
-                    if await send_game(chat_id, g):
-                        await asyncio.to_thread(state.record_delivery, g["id"], chat_id)
+                    if await send_delivery_unit(chat_id, batch, text):
+                        for g in batch:
+                            await asyncio.to_thread(state.record_delivery, g["id"], chat_id)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     msg = str(e).lower()
@@ -1930,6 +2044,7 @@ async def setup_commands():
             {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
             {"command": "prossimi", "description": "Giochi gratis Epic in arrivo"},
             {"command": "piattaforme", "description": "Scegli PC / Console / Android"},
+            {"command": "formato", "description": "Schede singole o elenco per dispositivo"},
             {"command": "contenuti", "description": "Giochi, DLC, Abbonamenti"},
             {"command": "generi", "description": "Filtra per genere"},
             {"command": "status", "description": "Stato iscrizione e filtri"},

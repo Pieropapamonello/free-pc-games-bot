@@ -4,6 +4,15 @@ Deploy webhook su Render.
 
 ## Comandi e destinatari
 
+- `/formato` permette di scegliere tra schede singole (impostazione iniziale)
+  ed elenco per dispositivo. La preferenza riguarda solo la chat corrente,
+  viene conservata in Firebase e in `display_prefs.json`, e vale per `/start`,
+  `/giochi`, `/cerca` e avvisi automatici. Il riepilogo contiene titoli cliccabili,
+  scadenze e condizioni DLC/free-to-play/abbonamento, senza immagini o video.
+  I dispositivi condivisi hanno un'intestazione combinata per evitare duplicati.
+  Gli elenchi lunghi vengono divisi in messaggi entro i limiti di Telegram.
+  In formato elenco le richieste manuali mostrano tutti i risultati;
+  nelle schede singole restano i limiti di 12 giochi e 8 risultati di ricerca.
 - `/start` iscrive la chat, apre il menu piattaforme e mostra fino a 12 giochi
   disponibili solo nella chat che invia il comando, usando i suoi filtri.
 - `/piattaforme` apre il menu senza inviare giochi.
