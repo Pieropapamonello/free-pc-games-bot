@@ -2420,7 +2420,7 @@ async def health_handler(request: web.Request):
         "sent": len(state.sent),
         "poll_minutes": POLL_MINUTES,
         "webhook_set": bool(PUBLIC_BASE_URL),
-        "media_revision": "translation-lock-v2",
+        "media_revision": "store-trailers-final-frame-v3",
         "youtube_downloader_configured": bool(os.getenv("NELLO_YOUTUBE_URL") and os.getenv("NELLO_YOUTUBE_TOKEN")),
     })
 

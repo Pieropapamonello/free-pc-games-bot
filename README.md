@@ -48,7 +48,9 @@ gioco. Non si scaricano giochi o video generici. Si preferiscono i trailer
 italiani dichiarati e i trailer di lancio. YouTube/Nello viene cercato soltanto
 quando nessun video diretto e' utilizzabile. Resta il limite di 180 secondi,
 verificato sul file completo, senza tagliare trailer piu' lunghi.
-Se la lingua manca nei metadati, Tesseract analizza cinque fotogrammi: il testo
+Se la lingua manca nei metadati, Tesseract analizza fino a cinque fotogrammi,
+partendo dalla schermata finale (due secondi prima della fine) in risoluzione
+1080p e fermandosi appena raccoglie prove sufficienti. Il testo
 visibile deve fornire almeno otto parole e 50 caratteri, con riconoscimento
 linguistico italiano/inglese di confidenza >=90%. Questa e' una verifica del
 testo visibile, non del parlato. Se non basta, il trailer viene scartato e resta

@@ -85,6 +85,20 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_visual_language_samples_final_card_with_readable_small_text(self):
+        calls = []
+        async def recognize(*args, **kwargs):
+            calls.append(args)
+            if args[0] == "tesseract" and "language-0-4.png" in str(args[1]):
+                return b"AVAILABLE NOW. All Rights Reserved. This game is a registered trademark of the publisher in Malaysia and other countries."
+            return b""
+        with tempfile.TemporaryDirectory() as folder, patch.object(trailers, "command", recognize):
+            language = await trailers.visual_language(Path("source.mp4"), 79, folder, 0)
+        self.assertEqual(language, "en")
+        last_frame = [args for args in calls if args[0] == "ffmpeg"][0]
+        self.assertEqual(last_frame[last_frame.index("-ss") + 1], "77")
+        self.assertEqual(last_frame[last_frame.index("-vf") + 1], "scale=-2:1080")
+        self.assertEqual(len([args for args in calls if args[0] == "tesseract"]), 1)
     async def test_publisher_video_urls_reject_private_addresses(self):
         with patch.object(trailers.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
             self.assertFalse(await trailers.public_https("https://publisher.example/trailer.mp4"))

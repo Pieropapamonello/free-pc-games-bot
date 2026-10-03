@@ -123,14 +123,22 @@ async def visual_language(source, duration, directory, index):
     """Recognize visible trailer text; never infer language from store locale."""
     texts = []
     try:
-        for sample, fraction in enumerate((0.10, 0.30, 0.50, 0.70, 0.90)):
+        positions = (duration * 0.03, duration * 0.25, duration * 0.50, duration * 0.75, max(0, duration - 2))
+        # End cards often contain the only readable language evidence. Inspect
+        # them first rather than spending the OCR budget on action scenes.
+        for sample in (4, 0, 1, 2, 3):
+            position = positions[sample]
             frame = Path(directory) / f"language-{index}-{sample}.png"
-            await command("ffmpeg", "-v", "error", "-y", "-ss", str(duration * fraction),
-                          "-i", source, "-frames:v", "1", "-vf", "scale=-2:720", frame, timeout=10)
+            height = 1080 if sample == 4 else 720
+            await command("ffmpeg", "-v", "error", "-y", "-ss", str(position),
+                          "-i", source, "-frames:v", "1", "-vf", f"scale=-2:{height}", frame, timeout=10)
             recognized = await command("tesseract", frame, "stdout", "-l", "eng+ita", "--psm", "11", timeout=10)
             text = " ".join(recognized.decode(errors="replace").split())
             if text not in texts:
                 texts.append(text)
+            language = text_language(" ".join(texts))
+            if language:
+                return language
         return text_language(" ".join(texts))
     except Exception as exc:
         log.info("Verifica lingua visiva non disponibile: %s", type(exc).__name__)
