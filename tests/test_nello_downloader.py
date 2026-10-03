@@ -7,6 +7,32 @@ from nello_downloader import download_youtube
 
 
 class NelloTests(unittest.IsolatedAsyncioTestCase):
+    async def test_space_download_and_cleanup_even_when_too_large(self):
+        for limit in (1000, 2):
+            session = MagicMock()
+            ident = "12345678-1234-1234-1234-123456789abc"
+            posted = session.post.return_value.__aenter__.return_value
+            posted.json = AsyncMock(return_value={"success": True, "artifact": ident})
+            media = session.get.return_value.__aenter__.return_value
+            async def chunks(size):
+                yield b"video-content"
+            media.content.iter_chunked = chunks
+            with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+                    "NELLO_YOUTUBE_URL": "https://bicimonello-nello-youtube.hf.space",
+                    "NELLO_YOUTUBE_TOKEN": "test-only"}):
+                destination = Path(folder) / "video.mp4"
+                if limit == 2:
+                    with self.assertRaises(ValueError):
+                        await download_youtube(session, "https://youtu.be/abcdefghijk", destination, limit)
+                else:
+                    await download_youtube(session, "https://youtu.be/abcdefghijk", destination, limit)
+                    self.assertEqual(destination.read_bytes(), b"video-content")
+            self.assertTrue(session.post.call_args.args[0].endswith("/api/youtube"))
+            self.assertEqual(session.post.call_args.kwargs["headers"], {"x-nello-token": "test-only"})
+            self.assertEqual(session.post.call_args.kwargs["json"]["max_duration"], 180)
+            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+            self.assertTrue(session.delete.call_args.args[0].endswith("/api/media/" + ident))
+
     async def test_protocol_downloads_media_and_deletes_job(self):
         session = MagicMock()
         posted = session.post.return_value.__aenter__.return_value

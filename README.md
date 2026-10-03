@@ -45,7 +45,14 @@ verificando la corrispondenza del titolo; se la ricerca non riesce resta un link
 I trailer YouTube ufficiali hanno priorita' tra i candidati della stessa lingua;
 resta il limite di 180 secondi e la verifica del canale sviluppatore/editore.
 
-Il client `nello_downloader.py` usa il protocollo `/jobs` del progetto
+Il client `nello_downloader.py` supporta lo Space YouTube di Nello:
+su Render impostare `NELLO_YOUTUBE_URL=https://bicimonello-nello-youtube.hf.space`
+e `NELLO_YOUTUBE_TOKEN` allo stesso valore del secret `NELLO_TOKEN` dello Space.
+Usa `/api/youtube` e scarica `/api/media/{artifact}`, eliminando il file remoto
+anche in caso di download fallito. `/api/healthz` permette il controllo pubblico.
+Il token va inserito solo nelle variabili segrete, mai in chat o nel repository.
+
+Resta supportato il protocollo `/jobs` del progetto
 [Nello](https://github.com/Pieropapamonello/Nello). Per attivarlo impostare
 `DOWNLOADER_URL` all'URL del servizio downloader e `DOWNLOADER_TOKEN` al suo
 token su Render. L'URL del bot Nello e quello del downloader possono differire:

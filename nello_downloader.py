@@ -1,4 +1,4 @@
-"""Client for the authenticated /jobs protocol in Pieropapamonello/Nello."""
+"""Clients for the Nello YouTube Space and legacy Nello jobs service."""
 import asyncio
 import os
 import uuid
@@ -7,13 +7,54 @@ from urllib.parse import urlparse
 import aiohttp
 
 
+def configured():
+    return bool((os.getenv("NELLO_YOUTUBE_URL") and os.getenv("NELLO_YOUTUBE_TOKEN"))
+                or (os.getenv("DOWNLOADER_URL") and os.getenv("DOWNLOADER_TOKEN")))
+
+
+async def download_space(session, base, token, url, destination, max_bytes):
+    headers = {"x-nello-token": token}
+    ident = None
+    try:
+        async with asyncio.timeout(150):
+            async with session.post(base + "/api/youtube", headers=headers,
+                    json={"url": url, "kind": "video", "max_duration": 180},
+                    timeout=aiohttp.ClientTimeout(total=120), allow_redirects=False) as response:
+                response.raise_for_status()
+                result = await response.json()
+            if not result.get("success"):
+                raise RuntimeError("Nello non ha estratto il trailer")
+            ident = str(uuid.UUID(result["artifact"]))
+            size = 0
+            async with session.get(base + "/api/media/" + ident, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60), allow_redirects=False) as response:
+                response.raise_for_status()
+                with destination.open("wb") as output:
+                    async for chunk in response.content.iter_chunked(65536):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ValueError("Trailer Nello troppo grande")
+                        output.write(chunk)
+    finally:
+        if ident:
+            try:
+                async with session.delete(base + "/api/media/" + ident, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False):
+                    pass
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+
+
 async def download_youtube(session, url, destination, max_bytes):
-    base = os.getenv("DOWNLOADER_URL", "").rstrip("/")
-    token = os.getenv("DOWNLOADER_TOKEN", "")
+    space = bool(os.getenv("NELLO_YOUTUBE_URL"))
+    base = os.getenv("NELLO_YOUTUBE_URL" if space else "DOWNLOADER_URL", "").rstrip("/")
+    token = os.getenv("NELLO_YOUTUBE_TOKEN" if space else "DOWNLOADER_TOKEN", "")
     if not base or not token:
         raise RuntimeError("Downloader Nello non configurato")
     if urlparse(base).scheme != "https":
         raise ValueError("Il downloader Nello richiede HTTPS")
+    if space or (urlparse(base).hostname or "").endswith(".hf.space"):
+        return await download_space(session, base, token, url, destination, max_bytes)
     ident = str(uuid.uuid4())
     headers = {"Authorization": "Bearer " + token}
     timeout = aiohttp.ClientTimeout(total=30)

@@ -12,7 +12,7 @@ import weakref
 from pathlib import Path
 
 import aiohttp
-from nello_downloader import download_youtube
+from nello_downloader import download_youtube, configured as nello_configured
 
 log = logging.getLogger(__name__)
 MAX_SECONDS = 180
@@ -203,7 +203,7 @@ class TrailerService:
         source = Path(directory) / f"source-{index}.mp4"
         expected_duration = candidate.get("duration")
         if candidate["kind"] == "youtube":
-            if os.getenv("DOWNLOADER_URL") and os.getenv("DOWNLOADER_TOKEN"):
+            if nello_configured():
                 try:
                     await download_youtube(session, candidate["url"], source, MAX_DOWNLOAD)
                     candidate = dict(candidate, kind="nello")
