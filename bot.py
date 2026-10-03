@@ -1065,36 +1065,6 @@ async def fetch_prime_gaming() -> list[dict]:
     return games
 
 
-async def fetch_freetogame() -> list[dict]:
-    """Catalogo free-to-play, distinto dalle promozioni a tempo."""
-    try:
-        data = await fetch_json("https://www.freetogame.com/api/games?sort-by=release-date")
-        if not isinstance(data, list):
-            return []
-        games = []
-        for item in data:
-            if not isinstance(item, dict) or not item.get("title") or not item.get("game_url"):
-                continue
-            # Escludi eventuali annunci di giochi non ancora usciti.
-            release = item.get("release_date") or ""
-            if release and release > datetime.now(timezone.utc).strftime("%Y-%m-%d"):
-                continue
-            desc = item.get("short_description") or ""
-            games.append({
-                "id": f"ftg_{item['id']}", "title": item["title"],
-                "description": desc, "url": item["game_url"],
-                "image": item.get("thumbnail") or "",
-                "platform": item.get("platform", "PC"), "categories": ["pc"],
-                "source": "FreeToGame", "source_url": "https://www.freetogame.com/",
-                "content_type": "game", "access_model": "free_to_play",
-                "catalog": "freetogame", "genres": detect_genres(item.get("genre", ""), desc),
-            })
-        return games
-    except Exception as exc:
-        log.warning("FreeToGame non disponibile: %s", exc)
-        return []
-
-
 async def fetch_mmobomb_giveaways() -> list[dict]:
     """Solo pacchetti/ricompense identificabili; no beta o concorsi ambigui."""
     try:
@@ -1183,7 +1153,6 @@ async def fetch_all_games() -> list[dict]:
         fetch_gamerpower_loot(),
         fetch_cheapshark(),
         fetch_mmobomb_giveaways(),
-        fetch_freetogame(),
         return_exceptions=True,
     )
     seen, unique = set(), []
@@ -1194,6 +1163,8 @@ async def fetch_all_games() -> list[dict]:
             continue
         games.extend(batch)
     for g in games:
+        if is_permanent_free_to_play(g):
+            continue
         # la chiave include il tipo: un gioco e un suo DLC non si annullano a vicenda
         key = (g.get("content_type", "game"), normalize_title(g["title"]))
         if key in seen:
@@ -1201,6 +1172,15 @@ async def fetch_all_games() -> list[dict]:
         seen.add(key)
         unique.append(g)
     return unique
+
+
+def is_permanent_free_to_play(game: dict) -> bool:
+    if game.get("content_type", "game") != "game":
+        return False
+    return (game.get("access_model") == "free_to_play"
+            or game.get("catalog") == "freetogame"
+            or game.get("source", "").casefold() == "freetogame"
+            or bool(re.search(r"\bfree[\s-]*to[\s-]*play\b|\bf2p\b", game.get("title", ""), re.I)))
 
 
 def filter_by_categories(games: list[dict], wanted: set[str]) -> list[dict]:
@@ -1230,7 +1210,8 @@ def filter_by_content(games: list[dict], wanted: set[str]) -> list[dict]:
     come 'game'. 'wanted' di default è {'game'} (no DLC, no abbonamenti)."""
     if not wanted:
         wanted = set(DEFAULT_CONTENT)
-    return [g for g in games if g.get("content_type", "game") in wanted]
+    return [g for g in games if g.get("content_type", "game") in wanted
+            and not is_permanent_free_to_play(g)]
 
 
 PRIME_AFFILIATE = "https://amzn.to/4eESlSY"
@@ -2025,12 +2006,6 @@ async def _broadcast_new_games(seed_only: bool = False):
     try:
         log.info("Controllo giochi gratuiti…")
         games = await fetch_all_games()
-        # Il primo caricamento del catalogo permanente non e' una novita:
-        # resta consultabile con /giochi e /cerca senza centinaia di notifiche.
-        for catalog in {g["catalog"] for g in games if g.get("catalog")}:
-            marker = f"catalog_initialized_{catalog}_v1"
-            if marker not in state.sent:
-                state.mark_sent([marker] + [g["id"] for g in games if g.get("catalog") == catalog])
         new = [g for g in games if g["id"] not in state.sent]
         if not new:
             log.info("Nessun nuovo gioco.")

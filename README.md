@@ -8,7 +8,7 @@ Deploy webhook su Render.
   ed elenco per dispositivo. La preferenza riguarda solo la chat corrente,
   viene conservata in Firebase e in `display_prefs.json`, e vale per `/start`,
   `/giochi`, `/cerca` e avvisi automatici. Il riepilogo contiene titoli cliccabili,
-  scadenze e condizioni DLC/free-to-play/abbonamento, senza immagini o video.
+  scadenze e condizioni DLC/abbonamento, senza immagini o video.
   I dispositivi condivisi hanno un'intestazione combinata per evitare duplicati.
   Gli elenchi lunghi vengono divisi in messaggi entro i limiti di Telegram.
   In formato elenco le richieste manuali mostrano tutti i risultati;
@@ -91,7 +91,7 @@ scadenza se nota e link "Scarica da", separati da spaziatura.
 Quando la traduzione non riesce, mostra un breve avviso in italiano.
 Telegram può andare ulteriormente a capo in base allo schermo e alla dimensione
 del font. Sono rimossi hashtag, prezzo originale e pulsanti del trailer.
-Le condizioni di abbonamento e la distinzione DLC/free-to-play restano visibili.
+Le condizioni di abbonamento e la distinzione DLC restano visibili.
 
 ## Fonti
 
@@ -102,10 +102,6 @@ Le condizioni di abbonamento e la distinzione DLC/free-to-play restano visibili.
 - Reddit FreeGameFindings: console/mobile/Prime e segnalazioni PC contrassegnate
   come giochi con link a Steam, Epic, GOG, itch.io, IndieGala o Ubisoft.
 - Prime Gaming: raccolta esistente dal canale freegamesnot; richiede abbonamento.
-- [FreeToGame](https://www.freetogame.com/api-doc): catalogo free-to-play per PC
-  e browser. Disponibile con `/giochi` (massimo 12 risultati) e `/cerca`.
-  Al primo controllo automatico i titoli esistenti vengono registrati senza
-  notifiche di massa; i successivi ingressi nel catalogo generano avvisi.
 - [MMOBomb](https://www.mmobomb.com/api): giveaway identificati come pacchetti
   e ricompense, visibili attivando DLC/contenuti. Beta, giveaway ambigui e chiavi
   esplicitamente esaurite vengono esclusi.
@@ -118,3 +114,7 @@ I titoli duplicati vengono unificati per nome e tipo di contenuto, dando priorit
 alle promozioni rispetto al catalogo permanente. Gli errori di una fonte non
 impediscono di consultare le altre. La disponibilità effettiva va confermata
 nella pagina dello store.
+
+I giochi free-to-play permanenti sono esclusi da liste, ricerche e avvisi.
+Il catalogo FreeToGame non viene piu' consultato. Restano le promozioni gratuite
+di giochi normalmente a pagamento e i giveaway di DLC/contenuti, se abilitati.

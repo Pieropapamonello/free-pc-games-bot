@@ -7,17 +7,6 @@ bot = test_start.bot
 
 
 class SourceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_freetogame_maps_browser_and_skips_future_releases(self):
-        rows = [{"id": 1, "title": "Example", "game_url": "https://example.com",
-                 "platform": "Web Browser", "release_date": "2020-01-01"},
-                {"id": 2, "title": "Future", "game_url": "https://example.com",
-                 "release_date": "2999-01-01"}]
-        with patch.object(bot, "fetch_json", AsyncMock(return_value=rows)):
-            games = await bot.fetch_freetogame()
-        self.assertEqual(len(games), 1)
-        self.assertEqual(games[0]["access_model"], "free_to_play")
-        self.assertEqual(games[0]["catalog"], "freetogame")
-
     async def test_cheapshark_only_accepts_zero_price_discounts(self):
         base = {"gameID": 1, "title": "Example", "dealID": "a%2Bb%3D",
                 "salePrice": "0.00", "normalPrice": "9.99", "isOnSale": "1"}
@@ -46,7 +35,7 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_isolated_and_cross_source_titles_deduplicated(self):
         names = ["fetch_epic_free", "fetch_gamerpower_all", "fetch_reddit_all",
                  "fetch_prime_gaming", "fetch_gamerpower_loot", "fetch_cheapshark",
-                 "fetch_mmobomb_giveaways", "fetch_freetogame"]
+                 "fetch_mmobomb_giveaways"]
         mocks = {}
         for name in names:
             replacement = AsyncMock(return_value=[])
@@ -57,25 +46,36 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
         game = {"id": "epic_example", "title": "Example", "content_type": "game"}
         mocks[names[0]].return_value = [game]
         mocks[names[1]].side_effect = RuntimeError("source down")
-        mocks[names[-1]].return_value = [dict(game, id="ftg_1"),
-                                        dict(game, id="ftg_2", title="Another")]
+        mocks["fetch_cheapshark"].return_value = [dict(game, id="cheap_1"),
+                                        dict(game, id="cheap_2", title="Another")]
         games = await bot.fetch_all_games()
-        self.assertEqual([g["id"] for g in games], ["epic_example", "ftg_2"])
+        self.assertEqual([g["id"] for g in games], ["epic_example", "cheap_2"])
 
 
 class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_start.StartRoutingTests.asyncSetUp
-    async def test_catalog_baseline_is_silent_but_next_new_title_is_sent(self):
-        old = dict(self.games[0], id="ftg_1", catalog="freetogame")
+    async def test_free_to_play_catalog_does_not_generate_notifications(self):
+        old = dict(self.games[0], id="ftg_1", catalog="freetogame", access_model="free_to_play")
         new = dict(old, id="ftg_2", title="New title")
-        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=[old])) as fetch, \
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=[old, new])), \
              patch.object(bot, "send_game", AsyncMock()) as send:
             await bot.broadcast_new_games()
             send.assert_not_awaited()
-            fetch.return_value = [old, new]
-            await bot.broadcast_new_games()
-            self.assertEqual(send.await_count, 3)
-            self.assertTrue(all(c.args[1]["id"] == "ftg_2" for c in send.await_args_list))
+
+    async def test_manual_lists_exclude_f2p_but_keep_paid_game_giveaways(self):
+        free = dict(self.games[0], id="permanent", access_model="free_to_play")
+        promo = dict(self.games[0], id="promotion")
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=[free, promo])), \
+             patch.object(bot, "send_game", AsyncMock(return_value=True)) as send:
+            await bot._handle_giochi(101)
+        send.assert_awaited_once_with(101, promo)
+
+    def test_f2p_dlc_rewards_remain_available_when_enabled(self):
+        items = [{"title": "Example (Free-to-play)", "content_type": "game"},
+                 {"title": "Example F2P Pack", "content_type": "dlc"},
+                 {"title": "Paid game giveaway", "content_type": "game"}]
+        result = bot.filter_by_content(items, {"game", "dlc"})
+        self.assertEqual(result, items[1:])
 
 
 class CardTests(unittest.TestCase):
