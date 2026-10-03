@@ -24,9 +24,9 @@ Deploy webhook su Render.
   crescente; le scadenze sconosciute sono in fondo allo store. Le date mostrate
   omettono l'anno, conservato per ordinamento e verifica delle offerte scadute.
   Amazon Prime compare nell'intestazione dello store senza ripetersi nelle righe.
-  In formato elenco le richieste manuali mostrano tutti i risultati;
-  nelle schede singole restano i limiti di 12 giochi e 8 risultati di ricerca.
-- `/start` iscrive la chat, apre il menu piattaforme e mostra fino a 12 giochi
+  Le richieste manuali mostrano tutti i risultati in entrambi i formati.
+  Le schede singole vengono distanziate di un secondo per limitare gli invii.
+- `/start` iscrive la chat, apre il menu piattaforme e mostra i giochi
   disponibili solo nella chat che invia il comando, usando i suoi filtri.
 - `/piattaforme` apre il menu senza inviare giochi.
 - Le richieste manuali non modificano lo storico globale delle notifiche.

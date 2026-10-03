@@ -2071,8 +2071,9 @@ async def _handle_giochi(chat_id: int):
             await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco trovato per i tuoi filtri. Cambia con /piattaforme, /generi o /contenuti.")
             return
         delivered = 0
-        selected = games if state.get_display(chat_id) == "digest" else games[:12]
-        for batch, text in delivery_units(chat_id, selected):
+        for index, (batch, text) in enumerate(delivery_units(chat_id, games)):
+            if index and text is None:
+                await asyncio.sleep(1)
             try:
                 if await send_delivery_unit(chat_id, batch, text):
                     delivered += len(batch)
@@ -2121,8 +2122,9 @@ async def _handle_cerca(chat_id: int, query: str):
             )
             return
         delivered = 0
-        selected = matches if state.get_display(chat_id) == "digest" else matches[:8]
-        for batch, text in delivery_units(chat_id, selected):
+        for index, (batch, text) in enumerate(delivery_units(chat_id, matches)):
+            if index and text is None:
+                await asyncio.sleep(1)
             try:
                 if await send_delivery_unit(chat_id, batch, text):
                     delivered += len(batch)

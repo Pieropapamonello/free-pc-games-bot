@@ -21,6 +21,24 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         restored = bot.State()
         self.assertEqual(restored.get_display(101), "digest")
 
+    async def test_single_cards_deliver_all_41_games_without_truncation(self):
+        games = [dict(self.games[0], id=str(i), title=f"Example {i}") for i in range(41)]
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=games)), \
+             patch.object(bot, "send_game", AsyncMock(return_value=True)) as send, \
+             patch.object(bot.asyncio, "sleep", AsyncMock()) as sleep:
+            await bot._handle_giochi(101)
+        self.assertEqual(send.await_count, 41)
+        self.assertEqual({call.args[1]["id"] for call in send.await_args_list}, {g["id"] for g in games})
+        self.assertEqual(sleep.await_count, 40)
+
+    async def test_search_single_cards_deliver_more_than_eight_matches(self):
+        games = [dict(self.games[0], id=str(i), title=f"Example {i}") for i in range(15)]
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=games)), \
+             patch.object(bot, "send_game", AsyncMock(return_value=True)) as send, \
+             patch.object(bot.asyncio, "sleep", AsyncMock()):
+            await bot._handle_cerca(101, "Example")
+        self.assertEqual(send.await_count, 15)
+
     async def test_firebase_display_restored(self):
         with patch.object(bot, "USE_FIREBASE", True), patch.object(
                 bot, "firebase_get", side_effect=lambda path:
