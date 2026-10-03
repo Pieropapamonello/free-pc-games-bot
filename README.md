@@ -11,8 +11,9 @@ Deploy webhook su Render.
   scadenze e condizioni DLC/abbonamento, senza immagini o video.
   I titoli multipiattaforma vengono inseriti una volta nel primo dispositivo
   scelto (PC, Console, Android/iOS), senza un ulteriore gruppo combinato.
-  Gli elenchi si dividono solo oltre 4000 unita' UTF-16 di testo visibile:
-  URL nascosti e tag HTML non contribuiscono al conteggio. I titoli omettono
+  Gli elenchi si dividono oltre 4000 unita' UTF-16 di testo visibile oppure
+  oltre il margine conservativo di 6000 byte di URL e 90 entita' formattate.
+  I link nascosti hanno un limite separato dal testo visibile. I titoli omettono
   parentesi di store/piattaforma, conservando quelle proprie del nome del gioco.
   Se Telegram rifiuta l'elenco con errore 400 (ad esempio `ENTITIES_TOO_LONG`
   per il volume dei collegamenti), il bot divide il gruppo e ritenta parti piu'

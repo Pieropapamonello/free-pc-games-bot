@@ -106,12 +106,14 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(bot.game_sort_key(older), bot.game_sort_key(newer))
         self.assertEqual(bot.format_date_it("2026-10-05T12:00:00Z"), "5 Ottobre")
 
-    def test_long_hidden_links_do_not_split_short_visible_list(self):
+    def test_hidden_link_budget_splits_before_telegram_rejects_entities(self):
         bot.state.set_display(101, "digest")
         games = [dict(self.games[0], id=str(i), title=f"Game {i} (Steam)",
                       url="https://example.com/" + "x" * 1000) for i in range(30)]
         units = bot.delivery_units(101, games)
-        self.assertEqual(len(units), 1)
+        self.assertGreater(len(units), 1)
+        self.assertEqual(sum(len(batch) for batch, _ in units), 30)
+        self.assertTrue(all(bot.digest_fits(text) for _, text in units))
         self.assertNotIn("(Steam)", units[0][1])
 
     def test_only_store_parentheses_removed_and_multiplatform_game_not_separate_group(self):

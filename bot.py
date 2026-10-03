@@ -318,6 +318,15 @@ def telegram_text_size(html: str) -> int:
     return len(visible.encode("utf-16-le")) // 2
 
 
+def digest_fits(html: str) -> bool:
+    # Telegram limita anche i dati delle entita', inclusi i link nascosti.
+    # Margine conservativo: il controllo del testo visibile da solo non basta.
+    links = re.findall(r'href="([^"]*)"', html)
+    link_bytes = sum(len(unescape(link).encode("utf-8")) for link in links)
+    entities = len(re.findall(r"<(?:a|b|code|pre)(?:\s|>)", html))
+    return telegram_text_size(html) <= 4000 and link_bytes <= 6000 and entities <= 90
+
+
 def hashtag(t: str) -> str:
     s = re.sub(r"[^\w]+", "_", t).strip("_")
     return f"#{s}" if s else ""
@@ -1790,7 +1799,7 @@ def delivery_units(chat_id: int, games: list[dict]):
             store = game_store(game)
             store_label = "itch" if store == "itch.io" else store
             store_heading = f"\n🛒 <b>{html_escape(store_label)}</b>\n" if store != previous_store else ""
-            if telegram_text_size(text + store_heading + line) > 4000 and batch:
+            if not digest_fits(text + store_heading + line) and batch:
                 units.append((batch, text))
                 text, batch = header, []
                 store_heading = f"🛒 <b>{html_escape(store_label)}</b>\n"
