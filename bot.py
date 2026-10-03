@@ -221,10 +221,11 @@ def _load_translation_cache():
 
 def _persist_translation(key: str, value: str):
     try:
-        path = DATA_DIR / "translations_it.json"
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(_translation_cache, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
+        with _translation_lock:
+            path = DATA_DIR / "translations_it.json"
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(_translation_cache, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(path)
     except OSError as exc:
         log.warning("Salvataggio traduzioni locale fallito: %s", type(exc).__name__)
     if USE_FIREBASE:
@@ -249,19 +250,22 @@ def translate_it(text: str) -> str:
         cached = _translation_cache.get(key)
         if cached and _valid_translation(t, cached):
             return cached
-        if _language(t) == "it":
-            return t
-        for provider in (_google_translation, _mymemory_translation, _google_translation):
-            try:
-                out = provider(t)
-                if _valid_translation(t, out):
+    if _language(t) == "it":
+        return t
+    # Never hold the shared cache lock during external HTTP requests: media
+    # workers would block translation of all subsequent game cards.
+    for provider in (_google_translation, _mymemory_translation, _google_translation):
+        try:
+            out = provider(t)
+            if _valid_translation(t, out):
+                with _translation_lock:
                     if len(_translation_cache) >= 2048:
                         _translation_cache.pop(next(iter(_translation_cache)))
                     _translation_cache[key] = out.strip()
-                    _persist_translation(key, out.strip())
-                    return out.strip()
-            except Exception as exc:
-                log.warning("Traduzione %s fallita: %s", getattr(provider, "__name__", "provider"), type(exc).__name__)
+                _persist_translation(key, out.strip())
+                return out.strip()
+        except Exception as exc:
+            log.warning("Traduzione %s fallita: %s", getattr(provider, "__name__", "provider"), type(exc).__name__)
     return TRANSLATION_UNAVAILABLE
 
 
@@ -2413,6 +2417,8 @@ async def health_handler(request: web.Request):
         "sent": len(state.sent),
         "poll_minutes": POLL_MINUTES,
         "webhook_set": bool(PUBLIC_BASE_URL),
+        "media_revision": "translation-lock-v2",
+        "youtube_downloader_configured": bool(os.getenv("NELLO_YOUTUBE_URL") and os.getenv("NELLO_YOUTUBE_TOKEN")),
     })
 
 
