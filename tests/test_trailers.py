@@ -10,6 +10,10 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_game_trailer_accepts_platform_suffix_but_excludes_dlc(self):
+        self.assertTrue(trailers.title_matches("GigaBash Official Launch Trailer | Nintendo Switch", "GigaBash"))
+        self.assertFalse(trailers.title_matches("GigaBash & Godzilla DLC - Launch Trailer | Nintendo Switch", "GigaBash"))
+        self.assertFalse(trailers.title_matches("GigaBash - Final Ascension DLC Official Trailer", "GigaBash"))
     def test_title_words_are_not_removed_as_marketing_labels(self):
         info = {"title": "Cave Story Official Launch Trailer", "channel": "Publisher",
                 "channel_is_verified": True, "duration": 120, "language": "en"}

@@ -49,7 +49,8 @@ def title_matches(name, title):
     words = re.findall(r"\w+", name.casefold())
     wanted = re.findall(r"\w+", title.casefold())
     marketing = set("official trailer launch reveal announcement gameplay cinematic story teaser "
-                    "english inglese eng italian italiano ita hd 4k 1080p 60fps".split())
+                    "english inglese eng italian italiano ita hd 4k 1080p 60fps "
+                    "pc ps4 ps5 xbox one series xs nintendo switch steam epic games store".split())
     if not wanted:
         return False
     for index in range(len(words) - len(wanted) + 1):
@@ -176,12 +177,15 @@ class TrailerService:
                     results = json.loads(await command(
                         sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
                         "--js-runtimes", "node", "--flat-playlist", "--dump-single-json", "--socket-timeout", "10",
-                        f"ytsearch3:{title} official trailer {language}", timeout=45))
+                        f"ytsearch8:{title} official launch trailer {language} -DLC -expansion", timeout=45))
                     for entry in results.get("entries") or []:
                         video_id = entry.get("id", "")
                         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) or video_id in seen:
                             continue
                         seen.add(video_id)
+                        if not title_matches(entry.get("title", ""), title):
+                            log.info("Trailer YouTube scartato per %s: titolo non corrispondente al gioco base", title)
+                            continue
                         # Skip channels already known not to belong to the game owners.
                         if identity(entry.get("channel")) not in {identity(o) for o in owners}:
                             continue
@@ -271,6 +275,7 @@ class TrailerService:
         details = await probe(source)
         duration = media_duration(details)
         if duration is None or not any(s.get("codec_type") == "video" for s in details.get("streams", [])):
+            log.info("Trailer scartato: durata oltre 180 secondi, sconosciuta o video assente (%s)", candidate["kind"])
             return None
         if expected_duration is not None and abs(duration - float(expected_duration)) > 0.5:
             return None
@@ -284,6 +289,7 @@ class TrailerService:
             return None
         language = language or (tags[0] if tags and len(set(tags)) == 1 else None)
         if language not in ("it", "en"):
+            log.info("Trailer scartato: lingua italiana/inglese non verificabile (%s)", candidate["kind"])
             return None
         target = Path(directory) / f"trailer-{index}.mp4"
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
