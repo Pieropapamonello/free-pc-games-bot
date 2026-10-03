@@ -25,12 +25,21 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 
 ## Descrizioni e video
 
-Le descrizioni di tutte le fonti passano dalla traduzione in italiano, anche
-quando la fonte dichiara di essere localizzata. Dopo due tentativi falliti la
-scheda conserva la descrizione originale della fonte, anche se inglese,
-invece di sostituirla con una frase generica. I metadati vengono usati soltanto
-quando la fonte non fornisce una descrizione.
-Le traduzioni riuscite vengono conservate in una cache limitata in memoria.
+Le descrizioni di tutte le fonti passano dalla traduzione in italiano. I testi
+gia' italiani vengono conservati. Si usa la risposta JSON del servizio pubblico
+Google Translate, con MyMemory come alternativa e un ultimo tentativo Google.
+Le richieste hanno timeout di connessione e lettura; i risultati vuoti, invariati
+in inglese o non italiani vengono scartati, considerando l'incertezza del
+rilevamento per frasi brevi. MyMemory riceve al massimo 480 byte di testo.
+La cache contiene solo traduzioni riuscite, con massimo 2048 elementi in memoria
+e nel file `translations_it.json`; Firebase conserva le traduzioni nel nodo
+`translations_it`, ricaricato all'avvio. Le traduzioni si riusano tra chat.
+Se tutti i servizi falliscono, la scheda resta visibile con un avviso in italiano,
+senza pubblicare il testo originale in inglese. Il bot ritenta dopo 15, 45 e 90
+secondi e aggiorna lo stesso messaggio se recupera la traduzione. Il recupero
+condivide il limite di 5 minuti delle attivita' media. Un guasto prolungato dei
+servizi puo' lasciare l'avviso fino alla successiva richiesta del gioco.
+I titoli ufficiali dei giochi conservano il nome originale.
 
 Ogni gioco viene mostrato con il banner originale della fonte, descrizione e link
 di riscatto. Se il banner manca o Telegram lo rifiuta, viene mostrata la scheda
@@ -79,7 +88,7 @@ per i risultati riusciti e dopo un minuto per gli errori temporanei.
 La scheda riprende il layout con banner in alto, intestazione "GRATIS SU…",
 titolo in grassetto maiuscolo e descrizione leggibile (massimo 280 caratteri),
 scadenza se nota e link "Scarica da", separati da spaziatura.
-Non mostra messaggi tecnici sulla traduzione.
+Quando la traduzione non riesce, mostra un breve avviso in italiano.
 Telegram può andare ulteriormente a capo in base allo schermo e alla dimensione
 del font. Sono rimossi hashtag, prezzo originale e pulsanti del trailer.
 Le condizioni di abbonamento e la distinzione DLC/free-to-play restano visibili.

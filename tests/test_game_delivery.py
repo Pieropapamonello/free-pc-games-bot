@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 from test_start import bot
@@ -8,31 +9,99 @@ from test_start import bot
 class TranslationTests(unittest.TestCase):
     def setUp(self):
         bot._translation_cache.clear()
+        patcher = patch.object(bot, "_persist_translation")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_failed_translation_preserves_real_source_description(self):
+    def test_failed_translation_never_publishes_english_description(self):
         original = "Celebrate Castlevania's 40th Anniversary and claim the original NES classic."
         with patch.object(bot, "translate_it", return_value=bot.TRANSLATION_UNAVAILABLE):
             card = bot.format_game({"title": "Castlevania", "description": original})
-        self.assertIn(original, card)
+        self.assertNotIn(original, card)
         self.assertNotIn("Scopri dettagli", card)
-        self.assertNotIn(bot.TRANSLATION_UNAVAILABLE, card)
+        self.assertIn(bot.TRANSLATION_UNAVAILABLE, card)
 
     def test_epic_description_is_translated_despite_source_flag(self):
-        with patch.object(bot, "GoogleTranslator") as translator:
-            translator.return_value.translate.return_value = "Esplora un mondo fantastico."
+        with patch.object(bot, "_google_translation", return_value="Esplora un mondo fantastico."):
             result = bot.format_game({"title": "Example", "translate": False,
                                       "description": "Explore a fantasy world."})
             self.assertIn("Esplora un mondo fantastico.", result)
             self.assertNotIn("Explore a fantasy world.", result)
 
     def test_failure_uses_italian_notice_and_can_recover(self):
-        with patch.object(bot, "GoogleTranslator") as translator:
-            translator.return_value.translate.side_effect = [
-                RuntimeError("offline"), RuntimeError("offline"), "Un mondo fantastico."]
+        with patch.object(bot, "_google_translation", side_effect=[
+                RuntimeError("offline"), RuntimeError("offline"), "Un mondo fantastico."]) as translator, \
+             patch.object(bot, "_mymemory_translation", side_effect=RuntimeError("offline")):
             self.assertEqual(bot.translate_it("A fantasy world."), bot.TRANSLATION_UNAVAILABLE)
             self.assertEqual(bot.translate_it("A fantasy world."), "Un mondo fantastico.")
             self.assertEqual(bot.translate_it("A fantasy world."), "Un mondo fantastico.")
-            self.assertEqual(translator.return_value.translate.call_count, 3)
+            self.assertEqual(translator.call_count, 3)
+
+    def test_alternative_used_when_google_returns_english(self):
+        source = "Build bridges and explore a fantasy world."
+        with patch.object(bot, "_google_translation", return_value=source), \
+             patch.object(bot, "_mymemory_translation", return_value="Costruisci ponti ed esplora un mondo fantastico.") as alternate:
+            self.assertEqual(bot.translate_it(source), "Costruisci ponti ed esplora un mondo fantastico.")
+        alternate.assert_called_once()
+
+    def test_italian_source_requires_no_network(self):
+        source = "Costruisci ponti ed esplora un mondo fantastico."
+        with patch.object(bot, "_google_translation") as google:
+            self.assertEqual(bot.translate_it(source), source)
+        google.assert_not_called()
+
+    def test_cache_survives_restart_and_reuses_translation_offline(self):
+        source = "Build bridges and explore a fantasy world."
+        translated = "Costruisci ponti ed esplora un mondo fantastico."
+        key = bot.hashlib.sha256(source.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(bot, "DATA_DIR", bot.Path(folder)), patch.object(bot, "USE_FIREBASE", False):
+            bot._translation_cache[key] = translated
+            # Chiamata reale al salvataggio, non al mock del setUp.
+            path = bot.DATA_DIR / "translations_it.json"
+            path.write_text(bot.json.dumps(bot._translation_cache), encoding="utf-8")
+            bot._translation_cache.clear()
+            bot._load_translation_cache()
+            with patch.object(bot, "_google_translation") as google:
+                self.assertEqual(bot.translate_it(source), translated)
+            google.assert_not_called()
+
+    def test_mymemory_quota_is_not_treated_as_translation(self):
+        with patch.object(bot.requests, "get") as get:
+            get.return_value.json.return_value = {"responseStatus": 200, "quotaFinished": True,
+                "responseData": {"translatedText": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS"}}
+            with self.assertRaises(ValueError):
+                bot._mymemory_translation("Build bridges and explore a fantasy world.")
+            self.assertEqual(get.call_args.kwargs["timeout"], (4, 8))
+
+    def test_english_cache_is_rejected_and_retranslated(self):
+        source = "Build bridges and explore a fantasy world."
+        key = bot.hashlib.sha256(source.encode()).hexdigest()
+        bot._translation_cache[key] = source
+        with patch.object(bot, "_google_translation", return_value="Costruisci ponti ed esplora un mondo fantastico.") as google:
+            result = bot.translate_it(source)
+        self.assertNotEqual(result, source)
+        google.assert_called_once()
+
+
+class DescriptionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_updates_existing_text_message(self):
+        with patch.object(bot.asyncio, "sleep", AsyncMock()), \
+             patch.object(bot, "format_game", return_value="Una descrizione tradotta in italiano."), \
+             patch.object(bot, "tg_api", AsyncMock(side_effect=[
+                 {"ok": False, "error_code": 400}, {"ok": True}])) as api:
+            result = await bot._refresh_description(101, 37, {"title": "Example"}, bot.TRANSLATION_UNAVAILABLE)
+        self.assertEqual(result, "Una descrizione tradotta in italiano.")
+        self.assertEqual([call.args[0] for call in api.await_args_list], ["editMessageCaption", "editMessageText"])
+        self.assertTrue(all(call.kwargs["message_id"] == 37 for call in api.await_args_list))
+
+    async def test_failed_recovery_keeps_card_without_english(self):
+        with patch.object(bot.asyncio, "sleep", AsyncMock()), \
+             patch.object(bot, "format_game", return_value=bot.TRANSLATION_UNAVAILABLE), \
+             patch.object(bot, "tg_api", AsyncMock()) as api:
+            result = await bot._refresh_description(101, 37, {"title": "Example"}, bot.TRANSLATION_UNAVAILABLE)
+        self.assertEqual(result, bot.TRANSLATION_UNAVAILABLE)
+        api.assert_not_called()
 
 
 class VideoTests(unittest.IsolatedAsyncioTestCase):

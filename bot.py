@@ -6,6 +6,8 @@ import re
 import secrets
 import textwrap
 import time
+import hashlib
+import threading
 from html import unescape
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -15,7 +17,8 @@ from typing import Any, Optional
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
-from deep_translator import GoogleTranslator
+import requests
+from langdetect import DetectorFactory, detect, LangDetectException
 
 from trailers import TrailerService
 
@@ -149,27 +152,115 @@ def normalize_title(title: str) -> str:
 
 
 _translation_cache: dict[str, str] = {}
+_translation_lock = threading.RLock()
+DetectorFactory.seed = 0
 TRANSLATION_UNAVAILABLE = "Descrizione in italiano momentaneamente non disponibile. Consulta la pagina del gioco dal link sotto."
+
+
+def _language(text: str) -> str:
+    try:
+        return detect(text)
+    except LangDetectException:
+        return ""
+
+
+def _valid_translation(source: str, translated: str) -> bool:
+    if not isinstance(translated, str) or not translated.strip():
+        return False
+    out = translated.strip()
+    if out == TRANSLATION_UNAVAILABLE:
+        return False
+    language = _language(out)
+    if out.casefold() == source.casefold() and _language(source) != "it":
+        return False
+    # Per frasi molto brevi il rilevatore puo' confondere italiano e spagnolo.
+    return language == "it" or (len(out) < 60 and language not in ("en", "de", "fr"))
+
+
+def _google_translation(text: str) -> str:
+    response = requests.get("https://translate.googleapis.com/translate_a/single",
+                            params={"client": "gtx", "sl": "auto", "tl": "it", "dt": "t", "q": text},
+                            timeout=(4, 8))
+    response.raise_for_status()
+    data = response.json()
+    return "".join(segment[0] for segment in data[0] if segment and isinstance(segment[0], str))
+
+
+def _mymemory_translation(text: str) -> str:
+    source = _language(text) or "en"
+    response = requests.get("https://api.mymemory.translated.net/get",
+                            params={"q": text, "langpair": f"{source}|it"}, timeout=(4, 8))
+    response.raise_for_status()
+    data = response.json()
+    if str(data.get("responseStatus")) != "200" or data.get("quotaFinished"):
+        raise ValueError("Servizio alternativo non disponibile")
+    return unescape(data["responseData"]["translatedText"])
+
+
+def _load_translation_cache():
+    with _translation_lock:
+        batches = []
+        try:
+            batches.append(json.loads((DATA_DIR / "translations_it.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        if USE_FIREBASE:
+            try:
+                batches.append(firebase_get("translations_it") or {})
+            except Exception as exc:
+                log.warning("Cache traduzioni Firebase non disponibile: %s", type(exc).__name__)
+        for data in batches:
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if isinstance(value, str) and value != TRANSLATION_UNAVAILABLE:
+                        _translation_cache[key] = value
+        while len(_translation_cache) > 2048:
+            _translation_cache.pop(next(iter(_translation_cache)))
+
+
+def _persist_translation(key: str, value: str):
+    try:
+        path = DATA_DIR / "translations_it.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_translation_cache, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        log.warning("Salvataggio traduzioni locale fallito: %s", type(exc).__name__)
+    if USE_FIREBASE:
+        try:
+            firebase_put(f"translations_it/{key}", value)
+        except Exception as exc:
+            log.warning("Salvataggio traduzione Firebase fallito: %s", type(exc).__name__)
 
 
 def translate_it(text: str) -> str:
     if not text:
         return text
-    t = text.strip()
+    t = " ".join(text.split())
     if not t:
         return ""
-    if t in _translation_cache:
-        return _translation_cache[t]
-    for attempt in range(2):
-        try:
-            out = GoogleTranslator(source="auto", target="it").translate(t[:4500])
-            if out and out.strip():
-                if len(_translation_cache) >= 512:
-                    _translation_cache.pop(next(iter(_translation_cache)))
-                _translation_cache[t] = out.strip()
-                return out.strip()
-        except Exception as e:
-            log.warning("Traduzione fallita (tentativo %d): %s", attempt + 1, e)
+    # Il paragrafo della scheda e' breve; MyMemory ammette al massimo 500 byte.
+    t = textwrap.shorten(t, width=450, placeholder="…")
+    while len(t.encode("utf-8")) > 480:
+        t = textwrap.shorten(t, width=len(t) - 10, placeholder="…")
+    key = hashlib.sha256(t.encode("utf-8")).hexdigest()
+    with _translation_lock:
+        cached = _translation_cache.get(key)
+        if cached and _valid_translation(t, cached):
+            return cached
+        if _language(t) == "it":
+            return t
+        for provider in (_google_translation, _mymemory_translation, _google_translation):
+            try:
+                out = provider(t)
+                if _valid_translation(t, out):
+                    if len(_translation_cache) >= 2048:
+                        _translation_cache.pop(next(iter(_translation_cache)))
+                    _translation_cache[key] = out.strip()
+                    _persist_translation(key, out.strip())
+                    return out.strip()
+            except Exception as exc:
+                log.warning("Traduzione %s fallita: %s", getattr(provider, "__name__", "provider"), type(exc).__name__)
     return TRANSLATION_UNAVAILABLE
 
 
@@ -1153,8 +1244,7 @@ def compact_description(text: str) -> str:
     plain = unescape(re.sub(r"<[^>]+>", " ", text or ""))
     translated = translate_it(" ".join(plain.split()))
     if translated == TRANSLATION_UNAVAILABLE:
-        # Una traduzione fallita non deve cancellare la descrizione del gioco.
-        translated = " ".join(plain.split())
+        return TRANSLATION_UNAVAILABLE
     # Paragrafo breve senza interruzioni artificiali nel mezzo delle frasi.
     return textwrap.shorten(translated, width=280, placeholder="…")
 
@@ -1347,15 +1437,33 @@ async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: 
     try:
         # The card is already visible; slow media lookup must not hold up games.
         async with asyncio.timeout(300):
+            if TRANSLATION_UNAVAILABLE in caption:
+                caption = await _refresh_description(chat_id, message_id, g, caption)
             info = await steam_lookup(g["title"])
             if g.get("enrich_description") and info and info.get("description"):
                 enriched = await asyncio.to_thread(format_game, dict(g, description=info["description"]))
-                if len(enriched) <= 1000:
+                if len(enriched) <= 1000 and TRANSLATION_UNAVAILABLE not in enriched:
                     caption = enriched
             await trailer_service.send(chat_id, clean_title(g["title"]), caption, info,
                                        await get_session(), API, tg_api, message_id=message_id)
     except Exception as exc:
         log.info("Scheda mantenuta senza trailer per %s: %s", g["title"], exc)
+
+
+async def _refresh_description(chat_id: int, message_id: int, g: dict, caption: str) -> str:
+    for delay in (15, 45, 90):
+        await asyncio.sleep(delay)
+        updated = await asyncio.to_thread(format_game, g)
+        if TRANSLATION_UNAVAILABLE in updated or len(updated) > 1000:
+            continue
+        result = await tg_api("editMessageCaption", chat_id=chat_id, message_id=message_id,
+                              caption=updated, parse_mode="HTML")
+        if not result.get("ok") and result.get("error_code") == 400:
+            result = await tg_api("editMessageText", chat_id=chat_id, message_id=message_id,
+                                  text=updated, parse_mode="HTML", disable_web_page_preview=True)
+        if result.get("ok"):
+            return updated
+    return caption
 
 
 async def send_game(chat_id: int, g: dict):
@@ -2056,6 +2164,7 @@ async def setup_commands():
 
 
 async def on_startup(app: web.Application):
+    await asyncio.to_thread(_load_translation_cache)
     app["broadcaster"] = asyncio.create_task(periodic_broadcaster())
     asyncio.create_task(setup_webhook(app))
     asyncio.create_task(setup_commands())
