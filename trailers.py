@@ -186,10 +186,21 @@ class TrailerService:
                         if identity(entry.get("channel")) not in {identity(o) for o in owners}:
                             continue
                         url = f"https://www.youtube.com/watch?v={video_id}"
-                        info = json.loads(await command(
-                            sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
-                            "--js-runtimes", "node", "--skip-download", "--dump-single-json", "--socket-timeout", "10",
-                            "--no-playlist", url, timeout=45))
+                        try:
+                            info = json.loads(await command(
+                                sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
+                                "--js-runtimes", "node", "--skip-download", "--dump-single-json", "--socket-timeout", "10",
+                                "--no-playlist", url, timeout=45))
+                        except Exception as exc:
+                            log.info("Metadati YouTube locali non disponibili per %s: %s", title, type(exc).__name__)
+                            # The trusted channel/title come from the search;
+                            # duration, media identity and language must still
+                            # be checked against the downloader response.
+                            if nello_configured() and entry.get("channel_is_verified") is True and title_matches(entry.get("title", ""), title) and re.search(r"\btrailer\b", entry.get("title", ""), re.I):
+                                candidates.append({"url": url, "language": language_of(entry),
+                                                   "kind": "youtube", "metadata_pending": True,
+                                                   "video_id": video_id, "game_title": title, "owners": owners})
+                            continue
                         if "channel_is_verified" not in info:
                             info["channel_is_verified"] = entry.get("channel_is_verified")
                         if official_youtube(info, title, owners):
@@ -205,11 +216,23 @@ class TrailerService:
         if candidate["kind"] == "youtube":
             if nello_configured():
                 try:
-                    await download_youtube(session, candidate["url"], source, MAX_DOWNLOAD)
+                    metadata = await download_youtube(session, candidate["url"], source, MAX_DOWNLOAD)
+                    if candidate.get("metadata_pending"):
+                        metadata = metadata or {}
+                        checked = {"title": metadata.get("title"), "channel": metadata.get("uploader"),
+                                   "channel_is_verified": True, "duration": metadata.get("duration"),
+                                   "language": (metadata.get("source_info") or {}).get("language")}
+                        if metadata.get("id") != candidate["video_id"] or not official_youtube(checked, candidate["game_title"], candidate["owners"]):
+                            raise ValueError("Metadati Nello non confermano il trailer ufficiale")
+                        candidate = dict(candidate, language=language_of(checked), duration=metadata["duration"])
+                        expected_duration = metadata["duration"]
                     candidate = dict(candidate, kind="nello")
                 except Exception as exc:
                     source.unlink(missing_ok=True)
-                    log.info("Downloader Nello non disponibile: %s", type(exc).__name__)
+                    log.info("Downloader Nello non disponibile per %s: errore=%s, HTTP=%s",
+                             candidate.get("game_title", "trailer"), type(exc).__name__, getattr(exc, "status", None))
+                    if candidate.get("metadata_pending"):
+                        return None
         if candidate["kind"] == "youtube":
             lang = candidate["language"]
             await command(

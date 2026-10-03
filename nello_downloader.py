@@ -35,6 +35,7 @@ async def download_space(session, base, token, url, destination, max_bytes):
                         if size > max_bytes:
                             raise ValueError("Trailer Nello troppo grande")
                         output.write(chunk)
+            return result
     finally:
         if ident:
             try:

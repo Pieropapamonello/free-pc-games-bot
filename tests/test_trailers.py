@@ -69,6 +69,23 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocked_local_metadata_routes_verified_search_to_nello(self):
+        import json
+        entry = {"id": "abcdefghijk", "title": "Example Official Trailer", "channel": "Publisher", "channel_is_verified": True}
+        search = json.dumps({"entries": [entry]}).encode()
+        with patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "command", AsyncMock(side_effect=[search, RuntimeError("Sign in to confirm you're not a bot"), search])):
+            candidates = await trailers.TrailerService().candidates("Example", {"official_match": True, "owners": ["Publisher"]})
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0]["metadata_pending"])
+        self.assertEqual(candidates[0]["video_id"], entry["id"])
+
+    async def test_nello_pending_metadata_rejects_wrong_video_identity(self):
+        candidate = {"kind": "youtube", "url": "https://youtu.be/abcdefghijk", "metadata_pending": True, "video_id": "abcdefghijk", "game_title": "Example", "owners": ["Publisher"]}
+        with tempfile.TemporaryDirectory() as folder, patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "download_youtube", AsyncMock(return_value={"id": "wrong-video", "title": "Example Official Trailer", "uploader": "Publisher", "duration": 120, "source_info": {"language": "en"}})), patch.object(trailers, "probe", AsyncMock()) as probe:
+            result = await trailers.TrailerService().prepare(candidate, None, folder, 0)
+        self.assertIsNone(result)
+        probe.assert_not_awaited()
+
     async def test_uploaded_video_replaces_existing_text_card(self):
         import json
         service = trailers.TrailerService()
