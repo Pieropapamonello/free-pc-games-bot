@@ -124,3 +124,34 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         units = bot.delivery_units(101, games)
         self.assertEqual(len(units), 1)
         self.assertEqual(len(units[0][0]), 2)
+
+    async def test_numbered_copy_buttons_match_each_game_and_include_share_details(self):
+        bot.state.set_display(101, "digest")
+        game = dict(self.games[0], title="Example (itch.io)", source="itch.io", end_date="2026-10-08")
+        batch, text = bot.delivery_units(101, [game])[0]
+        self.assertIn("<b>itch</b>", text)
+        self.assertNotIn("<b>itch.io</b>", text)
+        self.assertIn("1. <a", text)
+        with patch.object(bot, "tg_api", AsyncMock(return_value={"ok": True})) as api:
+            await bot.send_delivery_unit(101, batch, text)
+        button = api.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(button["text"], "📋 1")
+        copied = button["copy_text"]["text"]
+        self.assertIn("🎮 Example\n", copied)
+        self.assertIn("Piattaforma: PC", copied)
+        self.assertIn("Scade: 8 Ottobre", copied)
+        self.assertIn(game["url"], copied)
+
+    def test_long_shares_keep_full_link_with_whatsapp_fallback(self):
+        game = dict(self.games[0], url="https://example.com/" + "x" * 300)
+        button = bot.share_button(game, "1")
+        self.assertNotIn("copy_text", button)
+        from urllib.parse import parse_qs
+        copied = parse_qs(bot.urlparse(button["url"]).query)["text"][0]
+        self.assertIn(game["url"], copied)
+
+    def test_copy_content_preserves_prime_requirement_without_unknown_expiry(self):
+        game = dict(self.games[0], source="Amazon Prime Gaming", end_date="N/A")
+        copied = bot.share_game_text(game)
+        self.assertIn("Richiede Amazon Prime", copied)
+        self.assertNotIn("Scade:", copied)

@@ -32,6 +32,14 @@ Test di isolamento delle chat (senza inviare messaggi Telegram):
 
 ## Descrizioni e video
 
+Gli elenchi numerano i giochi e mostrano piccoli pulsanti in righe da cinque:
+"📋 1" copia nome, piattaforma, scadenza se nota e link del gioco numero 1.
+Il testo include le condizioni Prime/abbonamento e DLC quando necessarie.
+Per testi oltre 256 unita' UTF-16 si usa "📲 1", che apre WhatsApp con il testo
+completo precompilato senza inviarlo. Il link non viene mai troncato.
+L'intestazione itch.io viene mostrata come "itch" per evitare un collegamento
+automatico alla homepage; i titoli mantengono i link alle pagine dei giochi.
+
 Le descrizioni di tutte le fonti passano dalla traduzione in italiano. I testi
 gia' italiani vengono conservati. Si usa la risposta JSON del servizio pubblico
 Google Translate, con MyMemory come alternativa e un ultimo tentativo Google.

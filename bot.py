@@ -9,7 +9,7 @@ import time
 import hashlib
 import threading
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -1729,6 +1729,38 @@ def game_sort_key(game: dict):
             clean_title(game["title"]).casefold())
 
 
+def share_game_text(game: dict) -> str:
+    categories = set(game.get("categories") or ["pc"])
+    devices = " / ".join(label for cat, label in (("pc", "PC"), ("console", "Console"),
+                                                ("android", "Android / iOS")) if cat in categories)
+    parts = ["🎮 " + display_title(game["title"]), "Piattaforma: " + (devices or "Vedi pagina del gioco")]
+    if game_store(game) == "Amazon Prime":
+        parts.append("Richiede Amazon Prime")
+    elif game.get("content_type") == "subscription":
+        parts.append("Richiede abbonamento")
+    if game.get("content_type") == "dlc":
+        parts.append("DLC / contenuti")
+    date = format_date_it(game.get("end_date"))
+    if date:
+        parts.append("Scade: " + date)
+    url = game.get("url") or game.get("source_url") or ""
+    if urlparse(url).scheme in ("https", "http"):
+        parts.append(url)
+    return "\n".join(parts)
+
+
+def share_button(game: dict, label: str) -> dict:
+    text = share_game_text(game)
+    if len(text.encode("utf-16-le")) // 2 <= 256:
+        return {"text": "📋 " + label, "copy_text": {"text": text}}
+    return {"text": "📲 " + label, "url": "https://wa.me/?text=" + quote(text, safe="")}
+
+
+def share_keyboard(games: list[dict]) -> dict:
+    buttons = [share_button(game, str(index)) for index, game in enumerate(games, 1)]
+    return {"inline_keyboard": [buttons[index:index + 5] for index in range(0, len(buttons), 5)]}
+
+
 def delivery_units(chat_id: int, games: list[dict]):
     if state.get_display(chat_id) == "cards":
         return [([g], None) for g in sorted(games, key=game_sort_key)]
@@ -1761,13 +1793,15 @@ def delivery_units(chat_id: int, games: list[dict]):
             date = format_date_it(game.get("end_date"))
             if date:
                 note += " · ⏳ " + html_escape(date[:100])
-            line = f"• {link}{note}\n"
+            line = f"{len(batch) + 1}. {link}{note}\n"
             store = game_store(game)
-            store_heading = f"\n🛒 <b>{html_escape(store)}</b>\n" if store != previous_store else ""
-            if telegram_text_size(text + store_heading + line) > 4000 and batch:
+            store_label = "itch" if store == "itch.io" else store
+            store_heading = f"\n🛒 <b>{html_escape(store_label)}</b>\n" if store != previous_store else ""
+            if (telegram_text_size(text + store_heading + line) > 4000 or len(batch) >= 100) and batch:
                 units.append((batch, text))
                 text, batch = header, []
-                store_heading = f"🛒 <b>{html_escape(store)}</b>\n"
+                store_heading = f"🛒 <b>{html_escape(store_label)}</b>\n"
+                line = f"1. {link}{note}\n"
             text += store_heading + line
             batch.append(game)
             previous_store = store
@@ -1780,7 +1814,8 @@ async def send_delivery_unit(chat_id: int, batch: list[dict], text: Optional[str
     if text is None:
         return bool(await send_game(chat_id, batch[0]))
     response = await tg_api("sendMessage", chat_id=chat_id, text=text,
-                            parse_mode="HTML", disable_web_page_preview=True)
+                            parse_mode="HTML", disable_web_page_preview=True,
+                            reply_markup=share_keyboard(batch))
     if not response.get("ok"):
         raise RuntimeError(response.get("description", "Invio riepilogo fallito"))
     return True
