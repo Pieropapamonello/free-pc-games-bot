@@ -79,6 +79,13 @@ class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CardTests(unittest.TestCase):
+    def test_expired_dates_removed_but_unknown_deadlines_kept(self):
+        games = [{"end_date": value} for value in ("2000-01-01", "01/01/2000 12:00 UTC", "2999-01-01", "N/A", "")]
+        self.assertEqual(bot.filter_by_content(games, {"game"}), games[2:])
+
+    def test_prime_slug_title_capitalized_without_store_suffix(self):
+        self.assertEqual(bot._title_from_slug("five-nights-at-freddys-epic"), "Five Nights At Freddys")
+
     def test_compact_card_has_short_description_icons_and_no_hashtags(self):
         with patch.object(bot, "translate_it", return_value="Un gioco di avventura e azione. " * 20):
             description = bot.compact_description("text")

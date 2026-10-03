@@ -995,7 +995,7 @@ def _title_from_slug(slug: str) -> str:
         if name.endswith("-" + suf):
             name = name[: -(len(suf) + 1)]
             break
-    return name.replace("-", " ").strip()
+    return name.replace("-", " ").strip().title()
 
 
 async def fetch_prime_gaming() -> list[dict]:
@@ -1163,7 +1163,7 @@ async def fetch_all_games() -> list[dict]:
             continue
         games.extend(batch)
     for g in games:
-        if is_permanent_free_to_play(g):
+        if is_permanent_free_to_play(g) or is_expired_promotion(g):
             continue
         # la chiave include il tipo: un gioco e un suo DLC non si annullano a vicenda
         key = (g.get("content_type", "game"), normalize_title(g["title"]))
@@ -1172,6 +1172,27 @@ async def fetch_all_games() -> list[dict]:
         seen.add(key)
         unique.append(g)
     return unique
+
+
+def is_expired_promotion(game: dict) -> bool:
+    value = str(game.get("end_date") or "").strip()
+    if not value or value.upper() in ("N/A", "N/D", "NONE"):
+        return False
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M UTC", "%d/%m/%Y"):
+        try:
+            end = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            if fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+                end = end.replace(hour=23, minute=59, second=59)
+            return end < datetime.now(timezone.utc)
+        except ValueError:
+            continue
+    try:
+        end = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return end < datetime.now(timezone.utc)
+    except ValueError:
+        return False
 
 
 def is_permanent_free_to_play(game: dict) -> bool:
@@ -1211,7 +1232,7 @@ def filter_by_content(games: list[dict], wanted: set[str]) -> list[dict]:
     if not wanted:
         wanted = set(DEFAULT_CONTENT)
     return [g for g in games if g.get("content_type", "game") in wanted
-            and not is_permanent_free_to_play(g)]
+            and not is_permanent_free_to_play(g) and not is_expired_promotion(g)]
 
 
 PRIME_AFFILIATE = "https://amzn.to/4eESlSY"
@@ -1267,6 +1288,8 @@ def format_game(g: dict) -> str:
     date = format_date_it(g.get("end_date"))
     if date:
         parts.append("⏳ <b>Scade:</b> " + html_escape(date))
+    else:
+        parts.append("⏳ Scadenza non comunicata")
     if g.get("url"):
         parts.append("📥 <b>Scarica da:</b> " + text_link(g["url"], source))
     # Attribuzione richiesta dalle API, mantenuta compatta e cliccabile.
@@ -1567,6 +1590,8 @@ def delivery_units(chat_id: int, games: list[dict]):
             date = format_date_it(game.get("end_date"))
             if date:
                 note += " · ⏳ " + html_escape(date[:100])
+            else:
+                note += " · ⏳ Scadenza non comunicata"
             line = f"• {link}{note}\n"
             if len(text) + len(line) > 3900 and batch:
                 units.append((batch, text))

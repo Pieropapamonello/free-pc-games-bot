@@ -116,5 +116,8 @@ impediscono di consultare le altre. La disponibilità effettiva va confermata
 nella pagina dello store.
 
 I giochi free-to-play permanenti sono esclusi da liste, ricerche e avvisi.
+Le promozioni con una data di fine gia' passata sono escluse. Quando la fonte
+non comunica una data, la scheda e l'elenco indicano "Scadenza non comunicata".
+I nomi ricavati dagli URL Prime Gaming vengono capitalizzati per la lettura.
 Il catalogo FreeToGame non viene piu' consultato. Restano le promozioni gratuite
 di giochi normalmente a pagamento e i giveaway di DLC/contenuti, se abilitati.
