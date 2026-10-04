@@ -58,6 +58,11 @@ il banner. Il Dockerfile include Tesseract con i dati inglesi e italiani.
 L'OCR usa un solo thread e un budget totale di 90 secondi, con 40 secondi per
 estrazione/lettura di un fotogramma; i log distinguono le due fasi. La conversione
 usa il preset ultrafast per ridurre il carico sui servizi Render con poca CPU.
+Per i flussi Steam si seleziona la variante migliore entro 480p (oppure la piu'
+piccola disponibile). Se il file e' gia' H.264/yuv420p con audio AAC e sotto
+45 MB, si prepara l'MP4 con copia dei flussi e faststart, senza ricodifica.
+La conversione CPU viene eseguita solo per formati o dimensioni incompatibili.
+I timeout dei processi indicano nei log il programma e il limite raggiunto.
 Il trailer Steam di lancio di GigaBash e' stato controllato direttamente: le
 scritte finali sono inglesi e dura 79 secondi. Questa revisione e' associata
 all'esatto percorso/versione del video e alla durata, non al solo titolo del

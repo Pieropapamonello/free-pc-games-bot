@@ -1682,7 +1682,7 @@ async def _process_game_media(chat_id: int, message_id: int, g: dict, caption: s
                                        await get_session(), API, tg_api, message_id=message_id)
             log.info("Trailer %s: %s", g["title"], "allegato" if sent else "nessun candidato ufficiale verificato e utilizzabile")
     except Exception as exc:
-        log.info("Scheda mantenuta senza trailer per %s: %s", g["title"], exc)
+        log.info("Scheda mantenuta senza trailer per %s: %s (%s)", g["title"], type(exc).__name__, exc)
 
 
 async def _refresh_description(chat_id: int, message_id: int, g: dict, caption: str) -> str:
@@ -2420,7 +2420,7 @@ async def health_handler(request: web.Request):
         "sent": len(state.sent),
         "poll_minutes": POLL_MINUTES,
         "webhook_set": bool(PUBLIC_BASE_URL),
-        "media_revision": "store-trailers-reviewed-asset-v4",
+        "media_revision": "store-trailers-stream-copy-v5",
         "youtube_downloader_configured": bool(os.getenv("NELLO_YOUTUBE_URL") and os.getenv("NELLO_YOUTUBE_TOKEN")),
     })
 

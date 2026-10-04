@@ -10,6 +10,20 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_selects_480p_stream_instead_of_first_1080p_stream(self):
+        self.assertEqual(trailers.stream_video_map({"streams": [
+            {"index": 0, "codec_type": "audio"},
+            {"index": 1, "codec_type": "video", "height": 1080},
+            {"index": 2, "codec_type": "video", "height": 720},
+            {"index": 3, "codec_type": "video", "height": 480},
+            {"index": 4, "codec_type": "video", "height": 360}]}), "0:3")
+
+    def test_stream_copy_requires_compatible_codecs_and_bounded_size(self):
+        info = {"streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac"}]}
+        self.assertTrue(trailers.telegram_copy_compatible(info, 12_000_000))
+        self.assertFalse(trailers.telegram_copy_compatible(info, trailers.MAX_UPLOAD + 1))
+        info["streams"][0]["codec_name"] = "av1"
+        self.assertFalse(trailers.telegram_copy_compatible(info, 12_000_000))
     def test_reviewed_language_is_bound_to_exact_asset_and_duration(self):
         path = next(iter(trailers.REVIEWED_STEAM_ASSETS))
         url = "https://video.akamai.steamstatic.com" + path
@@ -92,6 +106,20 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compatible_video_is_remuxed_without_cpu_encoding(self):
+        details = {"format": {"duration": "79"}, "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}}]}
+        calls = []
+        async def remux(*args, **kwargs):
+            calls.append(args)
+            Path(args[-1]).write_bytes(b"video")
+            return b""
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "source-0.mp4").write_bytes(b"video")
+            with patch.object(trailers, "probe", AsyncMock(return_value=details)), patch.object(trailers, "command", remux):
+                result = await trailers.TrailerService().prepare({"kind": "nello", "language": "en"}, None, folder, 0)
+        self.assertEqual(result["duration"], 79)
+        self.assertIn("copy", calls[0])
+        self.assertNotIn("libx264", calls[0])
     async def test_reviewed_steam_asset_is_prepared_without_ocr(self):
         details = {"format": {"duration": "79"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio", "tags": {"language": "und"}}]}
         async def download_or_convert(*args, **kwargs):

@@ -106,10 +106,12 @@ async def command(*args, timeout=90, env=None):
         *map(str, args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except BaseException:
+    except BaseException as exc:
         if process.returncode is None:
             process.kill()
         await process.communicate()
+        if isinstance(exc, asyncio.TimeoutError):
+            raise TimeoutError(f"{Path(str(args[0])).name}: tempo massimo {timeout}s") from exc
         raise
     if process.returncode:
         raise RuntimeError(stderr.decode(errors="replace")[-400:])
@@ -197,6 +199,21 @@ def media_duration(info):
     if not values or any(not valid_duration(value) for value in values):
         return None
     return max(float(value) for value in values)
+
+
+def stream_video_map(info):
+    videos = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+    small = [s for s in videos if 0 < s.get("height", 0) <= 480]
+    selected = max(small, key=lambda s: s["height"]) if small else min(videos, key=lambda s: s.get("height") or 99999, default={})
+    return f"0:{selected['index']}" if "index" in selected else "0:v:0"
+
+
+def telegram_copy_compatible(info, size):
+    videos = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+    audio = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+    return bool(size <= MAX_UPLOAD and len(videos) == 1 and videos[0].get("codec_name") == "h264"
+                and videos[0].get("pix_fmt") == "yuv420p"
+                and all(s.get("codec_name") == "aac" for s in audio))
 
 
 class TrailerService:
@@ -376,7 +393,7 @@ class TrailerService:
             if expected_duration is None:
                 return None
             await command("ffmpeg", "-v", "error", "-y", "-rw_timeout", "20000000",
-                          "-i", candidate["url"], "-map", "0:v:0", "-map", "0:a:0?",
+                          "-i", candidate["url"], "-map", stream_video_map(remote), "-map", "0:a:0?",
                           "-c", "copy", "-fs", str(MAX_DOWNLOAD + 1), source, timeout=120)
         elif candidate["kind"] != "nello":
             async with session.get(candidate["url"], timeout=aiohttp.ClientTimeout(total=90), allow_redirects=False) as response:
@@ -426,7 +443,14 @@ class TrailerService:
             return None
         target = Path(directory) / f"trailer-{index}.mp4"
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
-        await command("ffmpeg", "-v", "error", "-y", "-i", source,
+        if telegram_copy_compatible(details, source.stat().st_size):
+            log.info("Preparazione trailer senza ricodifica: H.264/AAC compatibile con Telegram")
+            await command("ffmpeg", "-v", "error", "-y", "-i", source,
+                          "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+                          "-movflags", "+faststart", target, timeout=45)
+        else:
+            log.info("Conversione trailer necessaria: formato o dimensione non compatibile")
+            await command("ffmpeg", "-v", "error", "-y", "-i", source,
                       "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:480",
                       "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-b:v", "1200k",
                       "-maxrate", "1400k", "-bufsize", "2800k", "-pix_fmt", "yuv420p",
