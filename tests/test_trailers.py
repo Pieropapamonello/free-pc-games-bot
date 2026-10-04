@@ -173,7 +173,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await service.send(1, "Example", "Caption", {}, UploadSession(), "api", AsyncMock()))
         self.assertEqual(candidates.await_count, 2)
 
-    async def test_unknown_metadata_can_use_language_of_visible_video_text(self):
+    async def test_unknown_language_is_accepted_without_blocking_on_ocr(self):
         service = trailers.TrailerService()
         details = {"format": {"duration": "90"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio", "tags": {"language": "und"}}]}
         async def convert(*args, **kwargs):
@@ -183,8 +183,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             (Path(folder) / "source-0.mp4").write_bytes(b"downloaded")
             with patch.object(trailers, "probe", AsyncMock(return_value=details)), patch.object(trailers, "visual_language", AsyncMock(return_value="en")) as visual, patch.object(trailers, "command", convert):
                 result = await service.prepare({"kind": "nello", "language": None}, None, folder, 0)
-            self.assertEqual(result["language"], "en")
-            visual.assert_awaited_once()
+            self.assertIsNotNone(result)
+            self.assertIsNone(result["language"])
+            visual.assert_not_awaited()
 
     async def test_publisher_linked_trailer_reaches_downloader_without_local_inspection(self):
         with patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "command", AsyncMock(return_value=b'{"entries": []}')):

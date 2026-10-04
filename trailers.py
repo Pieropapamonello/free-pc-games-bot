@@ -351,7 +351,7 @@ class TrailerService:
                             continue
                         if "channel_is_verified" not in info:
                             info["channel_is_verified"] = entry.get("channel_is_verified")
-                        if official_youtube(info, title, owners):
+                        if official_youtube(info, title, owners, require_language=False):
                             candidates.append({"url": url, "language": language_of(info),
                                                "kind": "youtube", "duration": info["duration"]})
                 except Exception as exc:
@@ -385,13 +385,14 @@ class TrailerService:
                         return None
         if candidate["kind"] == "youtube":
             lang = candidate["language"]
+            language_filter = f"[language^=?{lang}]" if lang else ""
             await command(
                 sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
                 "--js-runtimes", "node", "--no-playlist", "--socket-timeout", "15", "--retries", "1",
                 "--max-filesize", str(MAX_DOWNLOAD),
                 "--match-filters", "duration <= 180 & !is_live",
-                "-f", (f"best[ext=mp4][height<=720][language^=?{lang}]/"
-                       f"bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a][language^=?{lang}]"),
+                "-f", (f"best[ext=mp4][height<=720]{language_filter}/"
+                       f"bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]{language_filter}"),
                 "--merge-output-format", "mp4",
                 "-o", source, candidate["url"], timeout=120)
         elif candidate["kind"] == "steam_stream":
@@ -431,12 +432,10 @@ class TrailerService:
             return None
         audio = [s for s in details.get("streams", []) if s.get("codec_type") == "audio"]
         raw_languages = [str(s.get("tags", {}).get("language") or "").lower() for s in audio]
-        if any(raw not in ("", "und") and language_of({"language": raw}) is None for raw in raw_languages):
-            return None
         tags = [language_of({"language": s.get("tags", {}).get("language")}) for s in audio]
         language = candidate.get("language")
-        if language and any(tag and tag != language for tag in tags):
-            return None
+        if any(raw not in ("", "und") for raw in raw_languages):
+            language = tags[0] if tags and len(set(tags)) == 1 else None
         language = language or (tags[0] if tags and len(set(tags)) == 1 else None)
         if language is None and candidate["kind"] in ("steam", "steam_stream"):
             language = reviewed_steam_language(candidate["url"], duration)
@@ -444,16 +443,8 @@ class TrailerService:
                 log.info("Lingua trailer confermata dalla revisione dello specifico video Steam: %s", language)
         if language is None:
             if diagnostic_title:
-                self.report(diagnostic_title, "Riconoscimento delle scritte nel video")
-            try:
-                language = await asyncio.wait_for(visual_language(source, duration, directory, index), timeout=90)
-            except asyncio.TimeoutError:
-                log.info("Verifica lingua visiva: tempo massimo raggiunto")
-            if language:
-                log.info("Lingua trailer verificata dal testo nel video: %s (%s)", language, candidate["kind"])
-        if language not in ("it", "en"):
-            log.info("Trailer scartato: lingua italiana/inglese non verificabile (%s)", candidate["kind"])
-            return None
+                self.report(diagnostic_title, "Trailer accettato anche senza lingua italiana/inglese verificata")
+            log.info("Trailer accettato senza filtro sulla lingua (%s)", candidate["kind"])
         target = Path(directory) / f"trailer-{index}.mp4"
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
         if telegram_copy_compatible(details, source.stat().st_size):
@@ -530,7 +521,7 @@ class TrailerService:
                                 prepared.append(trailer)
                                 log.info("Trailer pronto per %s: fonte=%s, lingua=%s", title, candidate.get("kind"), trailer["language"])
                                 break
-                            self.report(title, "Video scartato dai controlli di durata, lingua o formato")
+                            self.report(title, "Video scartato dai controlli di identità, durata o formato")
                         except Exception as exc:
                             self.report(title, "Preparazione video fallita", exc)
                             log.info("Trailer scartato per %s: %s", title, exc)
