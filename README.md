@@ -4,6 +4,15 @@ Deploy webhook su Render.
 
 ## Comandi e destinatari
 
+- `/diagnostica` mostra gli ultimi eventi dei trailer esclusivamente agli ID
+  utente indicati in `ADMIN_USER_IDS` su Render (numeri separati da virgole),
+  e soltanto nella chat privata del bot. Telegram identifica l'account mittente:
+  non servono password in chat. Senza la variabile il comando e' disabilitato.
+  `/status` mostra il proprio ID da inserire nella configurazione. Il comando
+  diagnostico compare nel menu privato degli admin, non nel menu generale.
+  Conserva 40 eventi in memoria e ne mostra dieci; si azzerano al riavvio.
+  Mostra fasi e tipi/codici di errore, mai messaggi grezzi o credenziali.
+
 - `/formato` permette di scegliere tra schede singole (impostazione iniziale)
   ed elenco per dispositivo. La preferenza riguarda solo la chat corrente,
   viene conservata in Firebase e in `display_prefs.json`, e vale per `/start`,

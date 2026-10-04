@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import weakref
+from collections import deque
 import ipaddress
 import socket
 from urllib.parse import urljoin, urlparse
@@ -218,10 +219,17 @@ def telegram_copy_compatible(info, size):
 
 class TrailerService:
     def __init__(self):
+        self.diagnostics = deque(maxlen=40)
         self.locks = weakref.WeakValueDictionary()
         self.slots = asyncio.Semaphore(2)
         self.cache = {}  # file_id or negative result; bounded, expires after 10 min/6 h
         self.gameplay_cache = {}
+
+    def report(self, title, stage, error=None):
+        # Store structured statuses only; never raw HTTP responses, URLs or
+        # exception messages that may contain credentials.
+        self.diagnostics.append((time.strftime("%H:%M:%S UTC", time.gmtime()), str(title)[:100], stage,
+                                 type(error).__name__ if error is not None else ""))
 
     async def gameplay(self, title):
         async with self.slots:
@@ -351,6 +359,7 @@ class TrailerService:
         return candidates
 
     async def prepare(self, candidate, session, directory, index):
+        diagnostic_title = candidate.get("_diagnostic_title")
         source = Path(directory) / f"source-{index}.mp4"
         expected_duration = candidate.get("duration")
         if candidate["kind"] == "youtube":
@@ -412,6 +421,8 @@ class TrailerService:
         if not source.exists() or source.stat().st_size > MAX_DOWNLOAD:
             return None
         details = await probe(source)
+        if diagnostic_title:
+            self.report(diagnostic_title, "Download completato; verifica durata e lingua")
         duration = media_duration(details)
         if duration is None or not any(s.get("codec_type") == "video" for s in details.get("streams", [])):
             log.info("Trailer scartato: durata oltre 180 secondi, sconosciuta o video assente (%s)", candidate["kind"])
@@ -432,6 +443,8 @@ class TrailerService:
             if language:
                 log.info("Lingua trailer confermata dalla revisione dello specifico video Steam: %s", language)
         if language is None:
+            if diagnostic_title:
+                self.report(diagnostic_title, "Riconoscimento delle scritte nel video")
             try:
                 language = await asyncio.wait_for(visual_language(source, duration, directory, index), timeout=90)
             except asyncio.TimeoutError:
@@ -444,11 +457,15 @@ class TrailerService:
         target = Path(directory) / f"trailer-{index}.mp4"
         # Full trailer, not a 3-minute cut of a longer video. Make a bounded MP4.
         if telegram_copy_compatible(details, source.stat().st_size):
+            if diagnostic_title:
+                self.report(diagnostic_title, "Preparazione MP4 senza ricodifica")
             log.info("Preparazione trailer senza ricodifica: H.264/AAC compatibile con Telegram")
             await command("ffmpeg", "-v", "error", "-y", "-i", source,
                           "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
                           "-movflags", "+faststart", target, timeout=45)
         else:
+            if diagnostic_title:
+                self.report(diagnostic_title, "Conversione del video in corso")
             log.info("Conversione trailer necessaria: formato o dimensione non compatibile")
             await command("ffmpeg", "-v", "error", "-y", "-i", source,
                       "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:480",
@@ -463,11 +480,13 @@ class TrailerService:
         return {"path": target, "language": language, "duration": checked}
 
     async def send(self, chat_id, title, caption, steam, session, api, tg_api, *, message_id=None):
+        self.report(title, "In attesa del worker video")
         lock = self.locks.setdefault(title, asyncio.Lock())
         async with lock, self.slots:
             cached = self.cache.get(title)
             if cached and cached["expires"] > time.monotonic():
                 if not cached.get("file_id"):
+                    self.report(title, "Nessun trailer utilizzabile nella cache; nuovo tentativo dopo 10 minuti")
                     return False
                 if message_id is None:
                     result = await tg_api("sendVideo", chat_id=chat_id, video=cached["file_id"],
@@ -486,9 +505,11 @@ class TrailerService:
                         # the validity of the shared Telegram video.
                         raise RuntimeError(description)
                 else:
+                    self.report(title, "Video dalla cache allegato correttamente")
                     return True
             if len(self.cache) >= 128:
                 self.cache.pop(next(iter(self.cache)))
+            self.report(title, "Ricerca trailer negli store")
             candidates = await self.candidates(title, steam, youtube=False)
             log.info("Trailer %s: candidati=%s, identita_store=%s, downloader_configurato=%s",
                      title, len(candidates), bool(steam and steam.get("official_match")), nello_configured())
@@ -503,15 +524,19 @@ class TrailerService:
                         candidates = [c for c in await self.candidates(title, steam) if c.get("kind") == "youtube"]
                     for index, candidate in enumerate(sorted(candidates, key=lambda c: c.get("language") != "it")[:6]):
                         try:
-                            trailer = await self.prepare(candidate, session, directory, phase * 10 + index)
+                            self.report(title, "Download e preparazione video")
+                            trailer = await self.prepare(dict(candidate, _diagnostic_title=title), session, directory, phase * 10 + index)
                             if trailer:
                                 prepared.append(trailer)
                                 log.info("Trailer pronto per %s: fonte=%s, lingua=%s", title, candidate.get("kind"), trailer["language"])
                                 break
+                            self.report(title, "Video scartato dai controlli di durata, lingua o formato")
                         except Exception as exc:
+                            self.report(title, "Preparazione video fallita", exc)
                             log.info("Trailer scartato per %s: %s", title, exc)
                 delivery_error = None
                 for trailer in sorted(prepared, key=lambda t: t["language"] != "it"):
+                    self.report(title, "Caricamento video su Telegram")
                     form = aiohttp.FormData()
                     fields = {"chat_id": str(chat_id), "caption": caption,
                               "parse_mode": "HTML", "supports_streaming": "true",
@@ -532,11 +557,14 @@ class TrailerService:
                                                 timeout=aiohttp.ClientTimeout(total=150)) as response:
                             result = await response.json()
                     if result.get("ok"):
+                        self.report(title, "Video allegato correttamente")
                         file_id = (result.get("result", {}).get("video") or {}).get("file_id")
                         if file_id:
                             self.cache[title] = {"file_id": file_id, "expires": time.monotonic() + 21600}
                         return True
                     delivery_error = result.get("description", "Invio trailer fallito")
+                    code = result.get("error_code")
+                    self.report(title, "Telegram ha rifiutato il video" + (f" (codice {code})" if isinstance(code, int) else ""))
                     if result.get("error_code") in (403, 429) or result.get("error_code", 0) >= 500:
                         raise RuntimeError(delivery_error)
                     log.info("Telegram rifiuta il trailer di %s: %s", title, result.get("description"))

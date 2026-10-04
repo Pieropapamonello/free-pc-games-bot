@@ -66,7 +66,7 @@ class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
             finished.append(message)
             active -= 1
         with patch.object(bot, "_media_card_slots", asyncio.Semaphore(2)), patch.object(bot, "_process_game_media", process):
-            await asyncio.gather(*(bot._attach_game_trailer(1, index, {}, "Caption") for index in range(6)))
+            await asyncio.gather(*(bot._attach_game_trailer(1, index, {"title": "Example"}, "Caption") for index in range(6)))
         self.assertEqual(peak, 2)
         self.assertEqual(sorted(finished), list(range(6)))
 

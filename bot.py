@@ -37,6 +37,8 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_urlsafe(24)
 FIREBASE_URL = os.getenv("FIREBASE_URL", "").rstrip("/")
 FIREBASE_SECRET = os.getenv("FIREBASE_SECRET", "")
 RAWG_KEY = os.getenv("RAWG_KEY", "")
+ADMIN_USER_IDS = {int(value) for value in re.split(r"[,\s]+", os.getenv("ADMIN_USER_IDS", ""))
+                  if value.isdecimal() and int(value) > 0}
 
 DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1647,6 +1649,7 @@ _media_card_slots = asyncio.Semaphore(2)
 
 
 async def _attach_game_trailer(chat_id: int, message_id: int, g: dict, caption: str):
+    trailer_service.report(display_title(g["title"]), "Scheda in coda per il trailer")
     # Queue complete cards before starting their deadline. Otherwise a large
     # list spends all 300 seconds waiting for gameplay/trailer worker slots.
     async with _media_card_slots:
@@ -1682,6 +1685,7 @@ async def _process_game_media(chat_id: int, message_id: int, g: dict, caption: s
                                        await get_session(), API, tg_api, message_id=message_id)
             log.info("Trailer %s: %s", g["title"], "allegato" if sent else "nessun candidato ufficiale verificato e utilizzabile")
     except Exception as exc:
+        trailer_service.report(display_title(g["title"]), "Elaborazione interrotta; banner mantenuto", exc)
         log.info("Scheda mantenuta senza trailer per %s: %s (%s)", g["title"], type(exc).__name__, exc)
 
 
@@ -2012,6 +2016,19 @@ def handle_update(update: dict) -> Optional[dict]:
         if not chat_id or not text:
             return None
         cmd = text.split()[0].lower().split("@")[0]
+        if cmd == "/diagnostica":
+            sender = msg.get("from") or {}
+            authorized = (sender.get("id") in ADMIN_USER_IDS and sender.get("id") == chat_id
+                          and (msg.get("chat") or {}).get("type") == "private"
+                          and not sender.get("is_bot") and not msg.get("sender_chat"))
+            if not authorized:
+                return {"method": "sendMessage", "chat_id": chat_id, "text": "Comando riservato agli amministratori nella chat privata del bot."}
+            lines = ["Diagnostica trailer (ultimi eventi, orari UTC)"]
+            for stamp, title, stage, error in list(trailer_service.diagnostics)[-10:]:
+                lines.append(f"\n{stamp} · {title}\n{stage}" + (f" · {error}" if error else ""))
+            if len(lines) == 1:
+                lines.append("Nessun evento video da questo avvio. Esegui /cerca e poi /diagnostica.")
+            return {"method": "sendMessage", "chat_id": chat_id, "text": "\n".join(lines), "disable_web_page_preview": True}
         if cmd == "/formato":
             return {"method": "sendMessage", "chat_id": chat_id,
                     "text": "📬 Come vuoi vedere i giochi?\n\n🖼 Una scheda con banner e descrizione per ogni gioco.\n📋 Un elenco di titoli e link per dispositivo, con meno messaggi.\n\nLa scelta vale anche per gli avvisi automatici.",
@@ -2072,6 +2089,7 @@ def handle_update(update: dict) -> Optional[dict]:
                 "chat_id": chat_id,
                 "text": (
                     "📊 Stato\n"
+                    f"• Il tuo ID Telegram: {(msg.get('from') or {}).get('id', 'non disponibile')}\n"
                     f"• Questa chat: {'iscritta ✅' if sub else 'non iscritta ❌'}\n"
                     f"• Chat totali iscritte: {len(state.chats)}\n"
                     f"• Intervallo controllo: ogni {POLL_MINUTES} min"
@@ -2452,7 +2470,7 @@ async def setup_webhook(app: web.Application):
 
 async def setup_commands():
     try:
-        await tg_api("setMyCommands", commands=[
+        commands = [
             {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
             {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
             {"command": "prossimi", "description": "Giochi gratis Epic in arrivo"},
@@ -2463,7 +2481,11 @@ async def setup_commands():
             {"command": "status", "description": "Stato iscrizione e filtri"},
             {"command": "stop", "description": "Disiscrivi questa chat"},
             {"command": "start", "description": "Iscrivi e configura"},
-        ])
+        ]
+        await tg_api("setMyCommands", commands=commands)
+        for admin_id in ADMIN_USER_IDS:
+            await tg_api("setMyCommands", scope={"type": "chat", "chat_id": admin_id},
+                         commands=commands + [{"command": "diagnostica", "description": "Diagnostica trailer (admin)"}])
     except Exception as e:
         log.warning("setMyCommands fallita: %s", e)
 
