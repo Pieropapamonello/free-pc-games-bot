@@ -22,8 +22,10 @@ from langdetect import DetectorFactory, detect, LangDetectException
 from bs4 import BeautifulSoup
 
 from trailers import TrailerService
+from admin_auth import AdminAuth
 
 trailer_service = TrailerService()
+admin_auth = AdminAuth()
 
 load_dotenv()
 
@@ -1919,6 +1921,40 @@ async def _save_display(chat_id: int, msg_id: int, mode: str):
                  reply_markup=display_keyboard(mode))
 
 
+def private_admin_message(msg):
+    sender = msg.get("from") or {}
+    chat = msg.get("chat") or {}
+    return bool(chat.get("type") == "private" and sender.get("id") == chat.get("id")
+                and isinstance(sender.get("id"), int) and sender["id"] > 0
+                and not sender.get("is_bot") and not msg.get("sender_chat"))
+
+
+def admin_panel(chat_id):
+    return {"method": "sendMessage", "chat_id": chat_id,
+            "text": "Area admin · sessione attiva\nLa sessione con password dura un'ora.",
+            "reply_markup": {"inline_keyboard": [[{"text": "Diagnostica trailer", "callback_data": "admin:diagnostics"}],
+                                                  [{"text": "Esci", "callback_data": "admin:logout"}]]}}
+
+
+async def admin_login(msg, password):
+    chat_id = msg["chat"]["id"]
+    if msg.get("message_id"):
+        try:
+            await tg_api("deleteMessage", chat_id=chat_id, message_id=msg["message_id"])
+        except Exception:
+            pass
+    result = await asyncio.to_thread(admin_auth.verify, chat_id, password)
+    if result == "ok":
+        response = admin_panel(chat_id)
+        method = response.pop("method")
+        await tg_api(method, **response)
+    else:
+        messages = {"wrong": "Password errata. Riprova oppure usa /annulla.",
+                    "limited": "Troppi tentativi. Riprova tra 15 minuti.",
+                    "expired": "Richiesta scaduta. Usa /admin."}
+        await tg_api("sendMessage", chat_id=chat_id, text=messages[result])
+
+
 def handle_update(update: dict) -> Optional[dict]:
     cb = update.get("callback_query")
     if cb:
@@ -1926,6 +1962,17 @@ def handle_update(update: dict) -> Optional[dict]:
         chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id")
         msg_id = (cb.get("message") or {}).get("message_id")
         cb_id = cb.get("id")
+        if data.startswith("admin:"):
+            original = cb.get("message") or {}
+            synthetic = {"from": cb.get("from"), "chat": original.get("chat")}
+            user = (cb.get("from") or {}).get("id")
+            if not private_admin_message(synthetic) or not (user in ADMIN_USER_IDS or admin_auth.active(user)):
+                return {"method": "answerCallbackQuery", "callback_query_id": cb_id, "text": "Accesso admin richiesto. Usa /admin in privato.", "show_alert": True}
+            if data == "admin:logout":
+                admin_auth.logout(user)
+                return {"method": "editMessageText", "chat_id": chat_id, "message_id": msg_id, "text": "Sessione terminata.", "reply_markup": {"inline_keyboard": []}}
+            if data == "admin:diagnostics":
+                return handle_update({"message": dict(synthetic, text="/diagnostica")})
         if not chat_id:
             return {"method": "answerCallbackQuery", "callback_query_id": cb_id}
         if data.startswith("display:"):
@@ -2016,9 +2063,22 @@ def handle_update(update: dict) -> Optional[dict]:
         if not chat_id or not text:
             return None
         cmd = text.split()[0].lower().split("@")[0]
+        if cmd in ("/admin", "/annulla", "/logout") or (private_admin_message(msg) and admin_auth.waiting(chat_id) and not text.startswith("/")):
+            if not private_admin_message(msg):
+                return {"method": "sendMessage", "chat_id": chat_id, "text": "Apri la chat privata del bot e usa /admin."}
+            if cmd in ("/annulla", "/logout"):
+                admin_auth.logout(chat_id)
+                return {"method": "sendMessage", "chat_id": chat_id, "text": "Sessione admin terminata."}
+            if cmd == "/admin":
+                if chat_id in ADMIN_USER_IDS or admin_auth.active(chat_id):
+                    return admin_panel(chat_id)
+                admin_auth.begin(chat_id)
+                return {"method": "sendMessage", "chat_id": chat_id, "text": "Inserisci la password admin nel prossimo messaggio. La richiesta scade tra 5 minuti. /annulla per uscire."}
+            asyncio.create_task(admin_login(msg, text))
+            return None
         if cmd == "/diagnostica":
             sender = msg.get("from") or {}
-            authorized = (sender.get("id") in ADMIN_USER_IDS and sender.get("id") == chat_id
+            authorized = ((sender.get("id") in ADMIN_USER_IDS or admin_auth.active(sender.get("id"))) and sender.get("id") == chat_id
                           and (msg.get("chat") or {}).get("type") == "private"
                           and not sender.get("is_bot") and not msg.get("sender_chat"))
             if not authorized:
@@ -2471,6 +2531,7 @@ async def setup_webhook(app: web.Application):
 async def setup_commands():
     try:
         commands = [
+            {"command": "admin", "description": "Accesso all'area amministratore"},
             {"command": "giochi", "description": "Mostra i giochi/contenuti gratis ora"},
             {"command": "cerca", "description": "Cerca un gioco gratis per nome"},
             {"command": "prossimi", "description": "Giochi gratis Epic in arrivo"},

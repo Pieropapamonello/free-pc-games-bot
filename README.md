@@ -4,10 +4,21 @@ Deploy webhook su Render.
 
 ## Comandi e destinatari
 
+- `/admin` apre il login in chat privata. La password viene chiesta nel
+  messaggio successivo e confrontata con un verificatore PBKDF2-SHA256 salato
+  (200000 iterazioni); il testo della password non e' nel repository. Il bot
+  tenta di cancellare il messaggio che contiene la password. Dopo l'accesso
+  compare il pannello con Diagnostica trailer ed Esci; `/logout` chiude la
+  sessione, `/annulla` interrompe il login. La richiesta dura cinque minuti,
+  la sessione un'ora e termina anche al riavvio. Sono ammessi cinque tentativi
+  per account ogni 15 minuti, con limite globale di 20 al minuto. Ogni callback
+  ricontrolla mittente, chat privata e autorizzazione. `ADMIN_PASSWORD_HASH`
+  puo' sostituire il verificatore nel formato `sale_esadecimale:hash_esadecimale`.
+
 - `/diagnostica` mostra gli ultimi eventi dei trailer esclusivamente agli ID
   utente indicati in `ADMIN_USER_IDS` su Render (numeri separati da virgole),
-  e soltanto nella chat privata del bot. Telegram identifica l'account mittente:
-  non servono password in chat. Senza la variabile il comando e' disabilitato.
+  oppure agli account con sessione password attiva, e soltanto nella chat privata
+  del bot. Senza la variabile resta disponibile l'accesso tramite `/admin`.
   `/status` mostra il proprio ID da inserire nella configurazione. Il comando
   diagnostico compare nel menu privato degli admin, non nel menu generale.
   Conserva 40 eventi in memoria e ne mostra dieci; si azzerano al riavvio.
