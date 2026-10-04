@@ -10,6 +10,25 @@ import test_start
 
 
 class MetadataTests(unittest.TestCase):
+    def test_official_embeds_exclude_comments_duplicates_and_fake_hosts(self):
+        html = '''<div class="formatted_description">
+        <iframe src="//www.youtube.com/embed/abcdefghijk"></iframe>
+        <iframe data-src="https://www.youtube-nocookie.com/embed/abcdefghijk"></iframe>
+        <iframe src="https://youtube.com.evil.example/embed/12345678901"></iframe>
+        </div><div class="comments"><iframe src="https://youtube.com/embed/12345678901"></iframe></div>'''
+        result = trailers.page_youtube_trailers(html, "https://dev.itch.io/game", "Game")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["video_id"], "abcdefghijk")
+        self.assertEqual(result[0]["publisher_page"], "https://dev.itch.io/game")
+
+    def test_embedded_video_needs_same_game_id_and_valid_duration(self):
+        candidate = {"video_id": "abcdefghijk", "game_title": "Final Witness"}
+        info = {"id": "abcdefghijk", "title": "Final Witness - Trailer", "duration": 35}
+        self.assertTrue(trailers.embedded_video_matches(info, candidate))
+        for change in ({"id": "12345678901"}, {"title": "Other game trailer"},
+                       {"duration": 181}, {"is_live": True}, {"title": "Final Witness walkthrough"}):
+            self.assertFalse(trailers.embedded_video_matches(dict(info, **change), candidate))
+
     def test_selects_480p_stream_instead_of_first_1080p_stream(self):
         self.assertEqual(trailers.stream_video_map({"streams": [
             {"index": 0, "codec_type": "audio"},
@@ -106,6 +125,20 @@ class UploadSession:
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedded_trailer_download_without_verified_channel(self):
+        candidate = {"kind": "youtube", "url": "https://youtube.com/watch?v=abcdefghijk",
+                     "video_id": "abcdefghijk", "game_title": "Final Witness",
+                     "publisher_page": "https://dev.itch.io/final-witness", "language": None}
+        async def download(session, url, path, limit):
+            path.write_bytes(b"video")
+            return {"id": "abcdefghijk", "title": "Final Witness Trailer", "duration": 35}
+        async def convert(*args, **kwargs):
+            Path(args[-1]).write_bytes(b"mp4")
+        details = {"format": {"duration": 35}, "streams": [{"codec_type": "video"}]}
+        with tempfile.TemporaryDirectory() as folder, patch.object(trailers, "nello_configured", return_value=True), patch.object(trailers, "download_youtube", download), patch.object(trailers, "probe", AsyncMock(return_value=details)), patch.object(trailers, "command", convert):
+            video = await trailers.TrailerService().prepare(candidate, None, folder, 0)
+            self.assertEqual(video["duration"], 35)
+
     async def test_compatible_video_is_remuxed_without_cpu_encoding(self):
         details = {"format": {"duration": "79"}, "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}}]}
         calls = []

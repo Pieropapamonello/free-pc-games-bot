@@ -193,6 +193,42 @@ def page_trailers(html, page):
     return result[:4]
 
 
+def page_youtube_trailers(html, page, title):
+    """Only publisher-authored embeds, never videos posted in comments."""
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup.select(".comments, .community_posts, .comment, #comments, script, nav, footer"):
+        node.decompose()
+    if (urlparse(page).hostname or "").endswith(".itch.io"):
+        roots = soup.select(".formatted_description, .video_embed, .screenshot_list")
+    else:
+        roots = [soup]
+    result, seen = [], set()
+    for root in roots:
+        for element in root.select("iframe[src], iframe[data-src]"):
+            parsed = urlparse(urljoin(page, element.get("src") or element.get("data-src") or ""))
+            match = re.fullmatch(r"/embed/([A-Za-z0-9_-]{11})/?", parsed.path)
+            if parsed.hostname not in ("youtube.com", "www.youtube.com", "www.youtube-nocookie.com", "youtube-nocookie.com") or not match:
+                continue
+            video_id = match[1]
+            if video_id in seen:
+                continue
+            seen.add(video_id)
+            result.append({"url": "https://www.youtube.com/watch?v=" + video_id,
+                           "kind": "youtube", "language": None, "video_id": video_id,
+                           "game_title": title, "publisher_page": page})
+    return result[:4]
+
+
+def embedded_video_matches(info, candidate):
+    name = str(info.get("title") or "")
+    words = " ".join(re.findall(r"\w+", name.casefold()))
+    game = " ".join(re.findall(r"\w+", candidate["game_title"].casefold()))
+    return bool(info.get("id") == candidate["video_id"] and game
+                and f" {game} " in f" {words} "
+                and not re.search(r"walkthrough|reaction|fan.?made|let.?s play", name, re.I)
+                and not info.get("is_live") and valid_duration(info.get("duration")))
+
+
 def media_duration(info):
     values = [info.get("format", {}).get("duration")]
     values += [s["duration"] for s in info.get("streams", []) if s.get("duration")]
@@ -297,12 +333,18 @@ class TrailerService:
                         response.raise_for_status()
                         if response.status != 200:
                             continue
-                        raw = await response.content.read(2_000_001)
+                        # read(n) may return only the first network chunk.
+                        raw = bytearray()
+                        async for chunk in response.content.iter_chunked(65536):
+                            raw.extend(chunk)
+                            if len(raw) > 2_000_000:
+                                break
                         if len(raw) > 2_000_000:
                             continue
                 for candidate in page_trailers(raw.decode(errors="replace"), page):
                     if await public_https(candidate["url"]):
                         candidates.append(candidate)
+                candidates.extend(page_youtube_trailers(raw.decode(errors="replace"), page, title))
             except Exception as exc:
                 log.info("Video editore non disponibile: %s", type(exc).__name__)
         if not youtube:
@@ -363,9 +405,27 @@ class TrailerService:
         source = Path(directory) / f"source-{index}.mp4"
         expected_duration = candidate.get("duration")
         if candidate["kind"] == "youtube":
+            if candidate.get("publisher_page"):
+                if diagnostic_title:
+                    self.report(diagnostic_title, "Video incorporato nella pagina ufficiale trovato")
+                # The publisher page supplies provenance, including for small
+                # developers without verified YouTube channels or Steam entries.
+                if not nello_configured():
+                    info = json.loads(await command(
+                        sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-warnings",
+                        "--js-runtimes", "node", "--skip-download", "--dump-single-json",
+                        "--socket-timeout", "10", "--no-playlist", candidate["url"], timeout=45))
+                    if not embedded_video_matches(info, candidate):
+                        return None
+                    expected_duration = info["duration"]
             if nello_configured():
                 try:
                     metadata = await download_youtube(session, candidate["url"], source, MAX_DOWNLOAD)
+                    if candidate.get("publisher_page"):
+                        if not embedded_video_matches(metadata or {}, candidate):
+                            source.unlink(missing_ok=True)
+                            return None
+                        expected_duration = metadata["duration"]
                     if candidate.get("metadata_pending"):
                         metadata = metadata or {}
                         checked = {"title": metadata.get("title"), "channel": metadata.get("uploader"),
@@ -381,7 +441,7 @@ class TrailerService:
                     log.info("Downloader Nello non disponibile per %s: errore=%s, HTTP=%s, motivo=%s",
                              candidate.get("game_title", "trailer"), type(exc).__name__, getattr(exc, "status", None),
                              str(exc) if isinstance(exc, NelloExtractionError) else "non_specificato")
-                    if candidate.get("metadata_pending"):
+                    if candidate.get("metadata_pending") or candidate.get("publisher_page"):
                         return None
         if candidate["kind"] == "youtube":
             lang = candidate["language"]
@@ -508,12 +568,17 @@ class TrailerService:
             # inside the file may identify an Italian trailer.
             with tempfile.TemporaryDirectory(prefix="official-trailer-") as directory:
                 prepared = []
+                attempted_urls = set()
                 for phase in range(2):
                     if phase:
                         if prepared:
                             break
                         candidates = [c for c in await self.candidates(title, steam) if c.get("kind") == "youtube"]
                     for index, candidate in enumerate(sorted(candidates, key=lambda c: c.get("language") != "it")[:6]):
+                        if candidate.get("url") in attempted_urls:
+                            continue
+                        if candidate.get("url"):
+                            attempted_urls.add(candidate["url"])
                         try:
                             self.report(title, "Download e preparazione video")
                             trailer = await self.prepare(dict(candidate, _diagnostic_title=title), session, directory, phase * 10 + index)
