@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import test_start
 
@@ -7,6 +7,16 @@ bot = test_start.bot
 
 
 class SourceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_steam_null_search_response_means_no_match(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value.json = AsyncMock(return_value=None)
+        self.assertIsNone(await bot._steam_search_one(session, "Final Witness", "final witness"))
+
+    async def test_steam_null_details_response_means_no_match(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value.json = AsyncMock(return_value=None)
+        with patch.object(bot, "_steam_cache", {}), patch.object(bot, "get_session", AsyncMock(return_value=session)), patch.object(bot, "_steam_search_one", AsyncMock(return_value=123)):
+            self.assertIsNone(await bot.steam_lookup("Example"))
     async def test_cheapshark_only_accepts_zero_price_discounts(self):
         base = {"gameID": 1, "title": "Example", "dealID": "a%2Bb%3D",
                 "salePrice": "0.00", "normalPrice": "9.99", "isOnSale": "1"}
@@ -55,6 +65,12 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
 class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_start.StartRoutingTests.asyncSetUp
 
+    async def test_manual_summary_counts_confirmed_cards_after_failure(self):
+        games = [dict(self.games[0], id=str(i), title=f"Game {i}") for i in range(3)]
+        with patch.object(bot, "fetch_all_games", AsyncMock(return_value=games)), patch.object(bot, "delivery_units", return_value=[([g], None) for g in games]), patch.object(bot, "send_delivery_unit", AsyncMock(side_effect=[True, RuntimeError("failed"), True])), patch.object(bot.asyncio, "sleep", AsyncMock()), patch.object(bot, "_manual_delivery_totals", {}) as totals:
+            await bot._handle_giochi(101)
+            self.assertEqual(totals[101], {"total": 3, "sent": 2, "status": "completato con errori di invio"})
+
     async def test_media_queue_runs_complete_cards_with_bounded_concurrency(self):
         import asyncio
         active, peak, finished = 0, 0, []
@@ -99,6 +115,9 @@ class CatalogNotificationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CardTests(unittest.TestCase):
+    def test_key_promotion_suffix_is_removed_without_changing_game_names(self):
+        self.assertEqual(bot.display_title("Dwarven Realms (Steam) Key Giveaway"), "Dwarven Realms")
+        self.assertEqual(bot.display_title("The Last Key"), "The Last Key")
     def test_expired_dates_removed_but_unknown_deadlines_kept(self):
         games = [{"end_date": value} for value in ("2000-01-01", "01/01/2000 12:00 UTC", "2999-01-01", "N/A", "")]
         self.assertEqual(bot.filter_by_content(games, {"game"}), games[2:])

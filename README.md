@@ -23,6 +23,9 @@ Deploy webhook su Render.
   diagnostico compare nel menu privato degli admin, non nel menu generale.
   Conserva 40 eventi in memoria e ne mostra dieci; si azzerano al riavvio.
   Mostra fasi e tipi/codici di errore, mai messaggi grezzi o credenziali.
+  Include il conteggio delle schede confermate per l'ultimo `/giochi` nella
+  chat corrente e indica se l'invio e' in corso, completato o con errori.
+  Questo conteggio e' separato dai trailer, elaborati successivamente.
 
 - `/formato` permette di scegliere tra schede singole (impostazione iniziale)
   ed elenco per dispositivo. La preferenza riguarda solo la chat corrente,

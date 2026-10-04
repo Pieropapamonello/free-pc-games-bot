@@ -316,6 +316,9 @@ def clean_title(t: str) -> str:
 
 def display_title(title: str) -> str:
     title = clean_title(title)
+    # Promotional key labels are not part of the game name. Preserve titles
+    # containing "Key" unless the Steam platform marker proves the suffix.
+    title = re.sub(r"\s*\(steam\)\s+keys?\s*$", "", title, flags=re.I)
     stores = r"steam(?: key)?|epic(?: games)?(?: store)?|gog|indiegala|itch\.?io\.?|stove|mobile|pc|android|ios|rift|oculus|meta quest|xbox|playstation|switch|ubisoft|drm[- ]free"
     title = re.sub(rf"\s*\((?:{stores})\)\s*", " ", title, flags=re.I)
     return " ".join(title.split())
@@ -1579,8 +1582,12 @@ async def _steam_search_one(sess, term: str, key: str) -> Optional[int]:
         headers={"User-Agent": "Mozilla/5.0"},
     ) as r:
         sr = await r.json(content_type=None)
+    if not isinstance(sr, dict):
+        return None
     fallback = None
     for item in (sr.get("items") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
         appid = item.get("id")
         if not appid:
             continue
@@ -1616,6 +1623,8 @@ async def steam_lookup(title: str) -> Optional[dict]:
                 headers={"User-Agent": "Mozilla/5.0"},
             ) as r:
                 ad = await r.json(content_type=None)
+            if not isinstance(ad, dict):
+                return None
             det = (ad.get(str(appid)) or {}).get("data") or {}
             desc = (det.get("short_description") or "").strip()
             image = det.get("header_image") or ""
@@ -1647,6 +1656,7 @@ async def steam_lookup(title: str) -> Optional[dict]:
 
 
 _media_tasks: set[asyncio.Task] = set()
+_manual_delivery_totals = {}
 _media_card_slots = asyncio.Semaphore(2)
 
 
@@ -2084,9 +2094,12 @@ def handle_update(update: dict) -> Optional[dict]:
             if not authorized:
                 return {"method": "sendMessage", "chat_id": chat_id, "text": "Comando riservato agli amministratori nella chat privata del bot."}
             lines = ["Diagnostica trailer (ultimi eventi, orari UTC)"]
+            summary = _manual_delivery_totals.get(chat_id)
+            if summary:
+                lines.append(f"Ultimo /giochi: schede inviate {summary['sent']}/{summary['total']} · {summary['status']}. I video vengono elaborati separatamente.")
             for stamp, title, stage, error in list(trailer_service.diagnostics)[-10:]:
                 lines.append(f"\n{stamp} · {title}\n{stage}" + (f" · {error}" if error else ""))
-            if len(lines) == 1:
+            if not trailer_service.diagnostics:
                 lines.append("Nessun evento video da questo avvio. Esegui /cerca e poi /diagnostica.")
             return {"method": "sendMessage", "chat_id": chat_id, "text": "\n".join(lines), "disable_web_page_preview": True}
         if cmd == "/formato":
@@ -2221,18 +2234,26 @@ async def _handle_giochi(chat_id: int):
             await tg_api("sendMessage", chat_id=chat_id, text="Nessun gioco trovato per i tuoi filtri. Cambia con /piattaforme, /generi o /contenuti.")
             return
         delivered = 0
+        if len(_manual_delivery_totals) >= 128 and chat_id not in _manual_delivery_totals:
+            _manual_delivery_totals.pop(next(iter(_manual_delivery_totals)))
+        summary = {"total": len(games), "sent": 0, "status": "in corso"}
+        _manual_delivery_totals[chat_id] = summary
         for index, (batch, text) in enumerate(delivery_units(chat_id, games)):
             if index and text is None:
                 await asyncio.sleep(1)
             try:
                 if await send_delivery_unit(chat_id, batch, text):
                     delivered += len(batch)
+                    summary["sent"] = delivered
             except Exception as e:
                 log.warning("send_game fallito: %s", e)
+        summary["status"] = "completato" if delivered == len(games) else "completato con errori di invio"
         if not delivered:
             await tg_api("sendMessage", chat_id=chat_id,
                          text="Non sono riuscito a inviare le schede dei giochi. Riprova tra poco.")
     except Exception as e:
+        if chat_id in _manual_delivery_totals:
+            _manual_delivery_totals[chat_id]["status"] = "interrotto"
         log.exception("Errore /giochi: %s", e)
 
 
